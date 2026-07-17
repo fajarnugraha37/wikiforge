@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/example/wikiforge/internal/config"
@@ -24,6 +25,7 @@ var (
 	mermaidRE      = regexp.MustCompile("(?s)```mermaid\\s*\\n(.*?)```")
 	backtickPathRE = regexp.MustCompile("`([^`]+[/\\\\][^`]+|[^`]+\\.[A-Za-z0-9]{1,12}(?::[0-9]+)?)`")
 	lineSuffixRE   = regexp.MustCompile(`(?i)(?::[0-9]+(?:-[0-9]+)?|#L[0-9]+(?:-L[0-9]+)?)$`)
+	progressMu     sync.Mutex
 )
 
 type Validator struct {
@@ -70,6 +72,11 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 	})
 	sort.Strings(files)
 	result.MarkdownFiles = len(files)
+	validationProgress(targetID, "validation pass started | profile=%s | files=%d | expected=%d | mermaid-mode=%s", profile, len(files), len(expected), v.Config.Mermaid.Mode)
+	defer func(started time.Time) {
+		validationProgress(targetID, "validation pass returned | elapsed=%s", compactValidationDuration(time.Since(started)))
+	}(time.Now())
+
 	minimumPages := max(profileMinimumPages, len(expected))
 	if v.Config.Documentation.MinimumPages > minimumPages {
 		minimumPages = v.Config.Documentation.MinimumPages
@@ -83,9 +90,10 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 		contractByOutput[filepath.ToSlash(path)] = contract
 	}
 
-	for _, path := range files {
+	for fileIndex, path := range files {
 		rel, _ := filepath.Rel(root, path)
 		rel = filepath.ToSlash(rel)
+		validationProgress(targetID, "checking file %d/%d | %s", fileIndex+1, len(files), rel)
 		b, err := os.ReadFile(path)
 		if err != nil {
 			add("DOC-READ", "error", rel, err.Error())
@@ -167,7 +175,7 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 				add("MERMAID-BASIC", "error", rel, fmt.Sprintf("diagram %d: %v", i+1, err))
 			}
 			if v.Config.Mermaid.Mode == "render" {
-				if err := v.renderMermaid(ctx, targetID, rel, i, block[1]); err != nil {
+				if err := v.renderMermaid(ctx, targetID, rel, i, len(blocks), block[1]); err != nil {
 					add("MERMAID-RENDER", "error", rel, fmt.Sprintf("diagram %d failed to render: %v", i+1, err))
 				}
 			}
@@ -234,6 +242,7 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 	}
 	result.Score = max(0, 100-errorsCount*8-warningsCount*2)
 	result.Accepted = errorsCount == 0 && result.Score >= v.Config.Documentation.MinimumQualityScore
+	validationProgress(targetID, "validation pass completed | accepted=%t | score=%d | findings=%d | mermaid=%d", result.Accepted, result.Score, len(result.Findings), result.MermaidBlocks)
 	return result
 }
 
@@ -418,7 +427,6 @@ func basicMermaidCheck(block string) error {
 	if len(lines) > 250 {
 		return fmt.Errorf("diagram exceeds 250 lines")
 	}
-	// Catch accidental enormous generated identifiers that make diagrams unusable.
 	for i, line := range lines {
 		if len(line) > 500 {
 			return fmt.Errorf("diagram line %d exceeds 500 characters", i+1)
@@ -427,7 +435,7 @@ func basicMermaidCheck(block string) error {
 	return nil
 }
 
-func (v Validator) renderMermaid(ctx context.Context, targetID, rel string, index int, content string) error {
+func (v Validator) renderMermaid(ctx context.Context, targetID, rel string, index, total int, content string) error {
 	if v.Config.Mermaid.Command == "" {
 		return fmt.Errorf("mermaid.command is empty")
 	}
@@ -457,17 +465,38 @@ func (v Validator) renderMermaid(ctx context.Context, targetID, rel string, inde
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	renderCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, v.Config.Mermaid.Command, args...)
+	cmd := exec.CommandContext(renderCtx, v.Config.Mermaid.Command, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+
+	started := time.Now()
+	validationProgress(targetID, "Mermaid render started | file=%s | diagram=%d/%d | timeout=%s", rel, index+1, total, timeout)
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-renderCtx.Done():
+				return
+			case <-ticker.C:
+				validationProgress(targetID, "Mermaid render still running | file=%s | diagram=%d/%d | elapsed=%s", rel, index+1, total, compactValidationDuration(time.Since(started)))
+			}
+		}
+	}()
+	runErr := cmd.Run()
+	close(done)
+	if runErr != nil {
+		return fmt.Errorf("%w: %s", runErr, strings.TrimSpace(stderr.String()))
 	}
 	if stat, err := os.Stat(output); err != nil || stat.Size() == 0 {
 		return fmt.Errorf("renderer produced no output")
 	}
+	validationProgress(targetID, "Mermaid render completed | file=%s | diagram=%d/%d | elapsed=%s", rel, index+1, total, compactValidationDuration(time.Since(started)))
 	return nil
 }
 
@@ -498,6 +527,27 @@ func FindingsText(findings []model.Finding) string {
 		fmt.Fprintf(&b, "- [%s] %s (%s): %s\n", strings.ToUpper(f.Severity), f.Code, f.Path, f.Message)
 	}
 	return b.String()
+}
+
+func validationProgress(targetID, format string, args ...any) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	values := append([]any{targetID}, args...)
+	_, _ = fmt.Fprintf(os.Stdout, "[%s/validation] "+format+"\n", values...)
+}
+
+func compactValidationDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	s := int((d % time.Minute) / time.Second)
+	if h > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%02d:%02d", m, s)
 }
 
 func toSet(values []string) map[string]bool {
