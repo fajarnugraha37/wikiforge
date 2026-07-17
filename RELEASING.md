@@ -8,11 +8,11 @@ From an up-to-date `main` branch:
 
 ```bash
 git pull --ff-only
-git tag v1.2.3
-git push origin v1.2.3
+git tag v<semver>
+git push origin v<semver>
 ```
 
-Use the next semantic version after `v1.2.3` once that tag already exists.
+Replace `<semver>` with the intended release version, for example `1.3.0`. Never move or reuse an existing release tag.
 
 The `release` workflow will:
 
@@ -34,8 +34,8 @@ The workflow also supports manual dispatch with an existing v-prefixed tag. It i
 ## Verify locally before tagging
 
 ```bash
-go test ./...
-go test -race ./...
+go test -count=1 ./...
+go test -race -count=1 ./...
 go vet ./...
 goreleaser release --snapshot --clean
 ```

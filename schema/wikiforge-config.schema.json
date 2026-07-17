@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/wikiforge-config.schema.json",
+  "$id": "https://raw.githubusercontent.com/fajarnugraha37/wikiforge/main/schema/wikiforge-config.schema.json",
   "title": "WikiForge Configuration",
   "type": "object",
   "required": [
@@ -12,7 +12,8 @@
       "type": "integer",
       "enum": [
         1,
-        2
+        2,
+        3
       ]
     },
     "workspace": {
@@ -32,7 +33,8 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "modelId": {
           "type": "string"
@@ -117,7 +119,77 @@
           "items": {
             "type": "string"
           },
-          "minItems": 1
+          "uniqueItems": true
+        },
+        "views": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "system",
+              "domain",
+              "component",
+              "flow",
+              "catalog",
+              "platform",
+              "engineering",
+              "operations"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "catalogs": {
+          "type": "object",
+          "properties": {
+            "shardBy": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "domain",
+                  "subdomain",
+                  "bounded-context",
+                  "component",
+                  "owner",
+                  "repository",
+                  "runtime",
+                  "transport",
+                  "data-store",
+                  "criticality"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "maximumRowsPerPage": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "evidence": {
+          "type": "object",
+          "properties": {
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "exclude": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "maxFileSizeBytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -139,7 +211,8 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "timeoutSeconds": {
           "type": "integer",
@@ -153,6 +226,12 @@
       "minItems": 1,
       "items": {
         "$ref": "#/$defs/component"
+      }
+    },
+    "documentationUnits": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/documentationUnit"
       }
     },
     "services": {
@@ -184,7 +263,8 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         }
       },
       "additionalProperties": false
@@ -202,6 +282,7 @@
       ]
     }
   ],
+  "additionalProperties": false,
   "$defs": {
     "component": {
       "type": "object",
@@ -216,8 +297,7 @@
         },
         "type": {
           "type": "string",
-          "minLength": 1,
-          "description": "Built-in types auto-select a profile; custom types may use an explicit profile and otherwise fall back to generic."
+          "minLength": 1
         },
         "profile": {
           "enum": [
@@ -254,13 +334,58 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
         },
         "dependsOn": {
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "uniqueItems": true
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "packs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "api",
+              "cache",
+              "concurrency",
+              "configuration",
+              "container-runtime",
+              "cryptography",
+              "data-access",
+              "database",
+              "distributed-coordination",
+              "domain",
+              "engineering",
+              "files",
+              "jobs",
+              "messaging",
+              "migrations",
+              "rate-limit",
+              "runtime",
+              "security",
+              "telemetry",
+              "workflow"
+            ]
+          },
+          "uniqueItems": true
         }
       },
       "additionalProperties": false,
@@ -280,6 +405,77 @@
           ]
         }
       ]
+    },
+    "documentationUnit": {
+      "type": "object",
+      "required": [
+        "id",
+        "component",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "component": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "domain",
+            "subdomain",
+            "bounded-context",
+            "component",
+            "module",
+            "flow",
+            "platform",
+            "catalog"
+          ]
+        },
+        "sourceRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "relatedUnits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "output": {
+          "type": "string"
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "criticality": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "legacyService": {
       "type": "object",

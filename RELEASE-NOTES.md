@@ -1,4 +1,31 @@
-# WikiForge 1.2.3 Release Notes
+# WikiForge 1.3.0 Release Notes
+
+## Adaptive planning foundation
+
+WikiForge now separates deployable components from documentation units and builds a deterministic discovery manifest plus adaptive documentation plan before generation. Configuration version 3 adds documentation views, composable capability packs, evidence boundaries, catalog shard policy, ownership/capability metadata, and explicit domain/module/flow/platform/catalog units.
+
+New commands:
+
+```text
+wikiforge discover
+wikiforge plan --explain
+wikiforge config migrate
+```
+
+Version 1 and 2 configurations remain accepted and are normalized to version 3. Existing fixed profile phases remain the compatibility renderer during Phase 1; prompts and system aggregation now consume the adaptive plan so Phase 2 can change the physical layout without discarding the orchestration core.
+
+## Correctness and safety
+
+- all registered capability packs have include, skip, or defer outcomes;
+- output-path collisions are explicit planning decisions rather than silent drops;
+- discovery is deterministic, bounded by configurable evidence rules, and does not follow symbolic links;
+- discovery and plan artifacts are persisted and included in whole-system snapshots;
+- failed runs preserve the last-successful source, documentation, discovery, and plan checkpoint;
+- JSON Schema, examples, CLI workflows, profile fixtures, orchestration, race detection, vet, build, and cross-platform CI are verified.
+
+---
+
+## WikiForge 1.2.3
 
 ## GitHub Releases and downloadable binaries
 

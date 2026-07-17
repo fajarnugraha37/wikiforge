@@ -140,8 +140,8 @@ func TestExecRunnerRejectsClarificationResponse(t *testing.T) {
 		Args:           []string{"-test.run=TestOpenWikiHelperProcess", "--", "code"},
 		TimeoutMinutes: 1,
 		Environment: map[string]string{
-			"WIKIFORGE_HELPER_PROCESS":       "1",
-			"WIKIFORGE_CLARIFICATION_TEST":   "1",
+			"WIKIFORGE_HELPER_PROCESS":      "1",
+			"WIKIFORGE_CLARIFICATION_TEST":  "1",
 			"WIKIFORGE_CAPTURE_PROMPT_PATH": filepath.Join(t.TempDir(), "prompt.txt"),
 		},
 	}}

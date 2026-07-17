@@ -45,7 +45,8 @@ func RenderComponentPhase(phase model.Phase, profile Profile, component config.C
 	if len(phase.PageContracts) > 0 {
 		supplemental = phase.PageContracts
 	}
-	common := map[string]string{
+	common := AdaptiveValues(model.DiscoveryManifest{}, model.DocumentationPlan{})
+	for key, value := range map[string]string{
 		"PROFILE_ID":             profile.ID,
 		"PROFILE_NAME":           profile.DisplayName,
 		"PROFILE_DESCRIPTION":    profile.Description,
@@ -60,6 +61,8 @@ func RenderComponentPhase(phase model.Phase, profile Profile, component config.C
 		"DIAGRAM_CONTRACT":       diagramContract(phase.RequiredDiagram),
 		"GUIDANCE":               profileGuidance(profile.ID, component.Type),
 		"SUPPLEMENTAL_CONTRACTS": supplementalContractsText(supplemental),
+	} {
+		common[key] = value
 	}
 	for k, v := range values {
 		common[k] = v
@@ -68,14 +71,20 @@ func RenderComponentPhase(phase model.Phase, profile Profile, component config.C
 }
 
 func RenderSystemPhase(phase model.Phase, language, targetID string) (string, error) {
+	return RenderSystemPhaseWithPlan(phase, language, targetID, model.DocumentationPlan{})
+}
+
+func RenderSystemPhaseWithPlan(phase model.Phase, language, targetID string, plan model.DocumentationPlan) (string, error) {
 	supplemental := SystemSupplementalPages
 	if len(phase.PageContracts) > 0 {
 		supplemental = phase.PageContracts
 	}
-	return Render(phase.PromptAsset, language, targetID, map[string]string{
-		"SYSTEM_CANONICAL_FILES":        systemCanonicalFilesText(),
-		"SYSTEM_SUPPLEMENTAL_CONTRACTS": supplementalContractsText(supplemental),
-	})
+	values := AdaptiveValues(model.DiscoveryManifest{}, plan)
+	values["DISCOVERY_ARTIFACT"] = "sources/components/*/discovery.json"
+	values["PLAN_ARTIFACT"] = "sources/system-plan.json"
+	values["SYSTEM_CANONICAL_FILES"] = systemCanonicalFilesText()
+	values["SYSTEM_SUPPLEMENTAL_CONTRACTS"] = supplementalContractsText(supplemental)
+	return Render(phase.PromptAsset, language, targetID, values)
 }
 
 func systemCanonicalFilesText() string {
@@ -87,15 +96,31 @@ func systemCanonicalFilesText() string {
 }
 
 func RenderComponentUpdate(profile Profile, component config.ComponentConfig, language string) (string, error) {
-	return RenderComponentPhase(model.Phase{PromptAsset: "prompts/component/update.md"}, profile, component, language, nil)
+	return RenderComponentUpdateWithValues(profile, component, language, nil)
+}
+
+func RenderComponentUpdateWithValues(profile Profile, component config.ComponentConfig, language string, values map[string]string) (string, error) {
+	return RenderComponentPhase(model.Phase{PromptAsset: "prompts/component/update.md"}, profile, component, language, values)
 }
 
 func RenderSystemUpdate(language, targetID string) (string, error) {
-	return RenderSystemPhase(model.Phase{PromptAsset: "prompts/system/update.md"}, language, targetID)
+	return RenderSystemUpdateWithPlan(language, targetID, model.DocumentationPlan{})
+}
+
+func RenderSystemUpdateWithPlan(language, targetID string, plan model.DocumentationPlan) (string, error) {
+	return RenderSystemPhaseWithPlan(model.Phase{PromptAsset: "prompts/system/update.md"}, language, targetID, plan)
 }
 
 func RenderInstructions(profile Profile, component config.ComponentConfig, language string) (string, error) {
-	return RenderTemplateValues("templates/instructions.md", language, component.ID, map[string]string{
+	return RenderInstructionsWithPlan(profile, component, language, model.DiscoveryManifest{}, model.DocumentationPlan{})
+}
+
+func RenderInstructionsWithPlan(profile Profile, component config.ComponentConfig, language string, manifest model.DiscoveryManifest, plan model.DocumentationPlan) (string, error) {
+	return RenderInstructionsWithPlanValues(profile, component, language, manifest, plan, nil)
+}
+
+func RenderInstructionsWithPlanValues(profile Profile, component config.ComponentConfig, language string, manifest model.DiscoveryManifest, plan model.DocumentationPlan, overrides map[string]string) (string, error) {
+	values := map[string]string{
 		"PROFILE_ID":          profile.ID,
 		"PROFILE_NAME":        profile.DisplayName,
 		"PROFILE_DESCRIPTION": profile.Description,
@@ -104,10 +129,96 @@ func RenderInstructions(profile Profile, component config.ComponentConfig, langu
 		"SCOPE":               displayScope(component.Scope),
 		"CANONICAL_FILES":     CanonicalFilesText(profile),
 		"GUIDANCE":            profileGuidance(profile.ID, component.Type),
-	})
+	}
+	for key, value := range AdaptiveValues(manifest, plan) {
+		values[key] = value
+	}
+	for key, value := range overrides {
+		values[key] = value
+	}
+	return RenderTemplateValues("templates/instructions.md", language, component.ID, values)
+}
+
+func AdaptiveValues(manifest model.DiscoveryManifest, plan model.DocumentationPlan) map[string]string {
+	const maxItems = 100
+	packs := "- None selected"
+	if len(plan.SelectedPacks) > 0 {
+		var b strings.Builder
+		for _, pack := range plan.SelectedPacks {
+			fmt.Fprintf(&b, "- `%s`\n", pack)
+		}
+		packs = strings.TrimRight(b.String(), "\n")
+	}
+	units := "- None configured or discovered"
+	if len(plan.Units) > 0 {
+		var b strings.Builder
+		for i, unit := range plan.Units {
+			if i >= maxItems {
+				fmt.Fprintf(&b, "- ... %d additional unit(s); read the plan artifact for the complete set.\n", len(plan.Units)-maxItems)
+				break
+			}
+			fmt.Fprintf(&b, "- `%s` kind=`%s` origin=`%s` roots=%s output=`%s`\n", unit.ID, unit.Kind, unit.Origin, stringList(unit.SourceRoots), unit.OutputPath)
+		}
+		units = strings.TrimRight(b.String(), "\n")
+	}
+	pages := "- No adaptive pages selected"
+	if len(plan.Pages) > 0 {
+		var b strings.Builder
+		for i, page := range plan.Pages {
+			if i >= maxItems {
+				fmt.Fprintf(&b, "- ... %d additional page(s); read the plan artifact for the complete set.\n", len(plan.Pages)-maxItems)
+				break
+			}
+			policy := ""
+			if len(page.ShardBy) > 0 {
+				policy = fmt.Sprintf(" shardBy=`%s` maximumRowsPerPage=`%d`", strings.Join(page.ShardBy, ","), page.MaximumRowsPerPage)
+			}
+			fmt.Fprintf(&b, "- `%s` view=`%s` kind=`%s`%s reason=%s\n", page.Path, page.View, page.Kind, policy, page.Reason)
+		}
+		pages = strings.TrimRight(b.String(), "\n")
+	}
+	decisions := "- No decisions"
+	if len(plan.Decisions) > 0 {
+		var b strings.Builder
+		for i, decision := range plan.Decisions {
+			if i >= maxItems {
+				fmt.Fprintf(&b, "- ... %d additional decision(s); read the plan artifact for the complete set.\n", len(plan.Decisions)-maxItems)
+				break
+			}
+			fmt.Fprintf(&b, "- `%s`: **%s** — %s\n", decision.Subject, decision.Action, decision.Reason)
+		}
+		decisions = strings.TrimRight(b.String(), "\n")
+	}
+	return map[string]string{
+		"ADAPTIVE_PACKS":      packs,
+		"DOCUMENTATION_UNITS": units,
+		"ADAPTIVE_PAGES":      pages,
+		"PLAN_DECISIONS":      decisions,
+		"DISCOVERY_ARTIFACT":  ".wikiforge/wikiforge-discovery.json",
+		"PLAN_ARTIFACT":       ".wikiforge/wikiforge-plan.json",
+	}
+}
+
+func stringList(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	return "[" + strings.Join(values, ", ") + "]"
+}
+
+func RenderSystemInstructions(language, targetID string, plan model.DocumentationPlan) (string, error) {
+	values := AdaptiveValues(model.DiscoveryManifest{}, plan)
+	values["DISCOVERY_ARTIFACT"] = "sources/components/*/discovery.json"
+	values["PLAN_ARTIFACT"] = "sources/system-plan.json"
+	return RenderTemplateValues("templates/system-instructions.md", language, targetID, values)
 }
 
 func Render(assetPath, language, targetID string, values map[string]string) (string, error) {
+	mergedValues := AdaptiveValues(model.DiscoveryManifest{}, model.DocumentationPlan{})
+	for key, value := range values {
+		mergedValues[key] = value
+	}
+	values = mergedValues
 	baseBytes, err := fs.ReadFile(assets.FS, "prompts/common/base.md")
 	if err != nil {
 		return "", err

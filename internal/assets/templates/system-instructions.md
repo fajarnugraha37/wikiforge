@@ -11,4 +11,22 @@ The wiki must help humans and LLM agents trace capabilities, deployables, module
 
 Documentation language: {{LANGUAGE}}
 System identifier: {{TARGET_ID}}
+## Adaptive system plan
+
+Selected capability packs aggregated from component plans:
+
+{{ADAPTIVE_PACKS}}
+
+Cross-component documentation units:
+
+{{DOCUMENTATION_UNITS}}
+
+Planned hierarchical system pages:
+
+{{ADAPTIVE_PAGES}}
+
+Planning decisions:
+
+{{PLAN_DECISIONS}}
+
 <!-- WIKIFORGE:END -->

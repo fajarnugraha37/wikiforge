@@ -8,3 +8,4 @@ description: "Files and subdirectories in Architecture."
 
 - [WikiForge Configuration Model](config-model.md) - YAML/JSON configuration schema, component types, profile selection, path normalization, and validation rules
 - [WikiForge Architecture Overview](overview.md) - High-level architecture, component model, phase lifecycle, state management, and cross-platform path handling in WikiForge
+- [Adaptive Planning Foundation](adaptive-planning.md) - Configuration v3, deterministic discovery, documentation units, composable packs, and adaptive planning

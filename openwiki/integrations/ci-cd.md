@@ -1,14 +1,14 @@
 ---
 type: Playbook
 title: CI/CD and Release Operations
-description: GitHub Actions workflows for CI testing, OpenWiki scheduled updates, and GoReleaser-powered binary releases
+description: GitHub Actions workflows for multi-platform CI testing and GoReleaser-powered binary releases
 tags: [ci, cd, github-actions, goreleaser, release]
 resource: /.github/workflows
 ---
 
 # CI/CD and Release Operations
 
-WikiForge has three GitHub Actions workflows, a GoReleaser configuration, a Dockerfile, and documented release procedures.
+WikiForge has two GitHub Actions workflows, a GoReleaser configuration, a Dockerfile, and documented release procedures.
 
 ## CI workflow
 
@@ -18,9 +18,10 @@ WikiForge has three GitHub Actions workflows, a GoReleaser configuration, a Dock
 - **Steps**:
   1. `actions/checkout@v4`
   2. `actions/setup-go@v5` with Go 1.23.x
-  3. `go test ./...` (all OS)
-  4. `go test -race ./...` (Linux only, for race detection)
-  5. `go build ./cmd/wikiforge`
+  3. `go test -count=1 ./...` (all OS)
+  4. `go vet ./...` (all OS)
+  5. `go test -race -count=1 ./...` (Linux only, for race detection)
+  6. `go build ./cmd/wikiforge`
 
 This is a verification workflow only. It does not publish binaries.
 
@@ -39,8 +40,8 @@ This is a verification workflow only. It does not publish binaries.
 
 ```bash
 git pull --ff-only
-git tag v1.2.4
-git push origin v1.2.4
+git tag v<semver>
+git push origin v<semver>
 ```
 
 ### Manual re-release
@@ -71,23 +72,11 @@ SHA-256 checksums are uploaded as `checksums.txt`.
 
 Environment: `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`, `OPENWIKI_TELEMETRY_DISABLED=1`.
 
-## OpenWiki scheduled update
-
-[`/.github/workflows/openwiki-update.yml`](/.github/workflows/openwiki-update.yml) runs daily at 08:00 UTC:
-
-1. Check out repository
-2. Install Node.js 22
-3. Install OpenWiki globally
-4. Run `openwiki code --update --print` (with OpenRouter provider and GLM-5.2 model)
-5. Create a pull request with changes under `openwiki/`, `AGENTS.md`, `CLAUDE.md`, and the workflow file itself
-
-This workflow is the mechanism for keeping the repository's own documentation fresh.
-
 ## Build verification
 
-[`/BUILD-VERIFICATION.md`](/BUILD-VERIFICATION.md) documents the verified build process for release 1.2.3:
+[`/BUILD-VERIFICATION.md`](/BUILD-VERIFICATION.md) documents the verified build process for the current source revision:
 
-- `go test ./...` and `go test -race ./...` passed
+- `go test -count=1 ./...` and `go test -race -count=1 ./...` passed
 - `go vet ./...` passed
 - OpenWiki executable runner contract tests passed
 - Large-prompt transport regression tested (160 KB prompts, <4 KiB arguments)
@@ -109,8 +98,8 @@ The [`/RELEASING.md`](/RELEASING.md) document records the full release procedure
 ### Pre-tag verification
 
 ```bash
-go test ./...
-go test -race ./...
+go test -count=1 ./...
+go test -race -count=1 ./...
 go vet ./...
 goreleaser release --snapshot --clean
 ```
@@ -121,7 +110,6 @@ goreleaser release --snapshot --clean
 |---|---|
 | `/.github/workflows/ci.yml` | Multi-OS CI verification |
 | `/.github/workflows/release.yml` | Tag-triggered GoReleaser release |
-| `/.github/workflows/openwiki-update.yml` | Scheduled OpenWiki doc update |
 | `/.goreleaser.yaml` | GoReleaser cross-compilation config |
 | `/Dockerfile` | Multi-stage Docker build |
 | `/RELEASING.md` | Release procedure documentation |

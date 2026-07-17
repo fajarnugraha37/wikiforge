@@ -1,10 +1,12 @@
 package prompts
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/example/wikiforge/internal/config"
+	"github.com/example/wikiforge/internal/model"
 )
 
 func TestApplicationSupplementalCoverage(t *testing.T) {
@@ -167,5 +169,47 @@ func TestSplitContractUsesFreshResumePhaseIDs(t *testing.T) {
 		if systemIDs[obsolete] {
 			t.Fatalf("obsolete system resume phase ID remains active: %s", obsolete)
 		}
+	}
+}
+
+func TestComponentPromptsAlwaysResolveAdaptivePlaceholders(t *testing.T) {
+	profile, err := GetProfile("application")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := RenderComponentPhase(profile.Phases[0], profile, testComponent(), "English", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, placeholder := range []string{"{{ADAPTIVE_PACKS}}", "{{DOCUMENTATION_UNITS}}", "{{ADAPTIVE_PAGES}}", "{{PLAN_DECISIONS}}"} {
+		if strings.Contains(text, placeholder) {
+			t.Fatalf("unresolved %s", placeholder)
+		}
+	}
+}
+
+func TestSystemPromptsResolveAdaptivePlaceholders(t *testing.T) {
+	text, err := RenderSystemPhase(SystemPhases[0], "English", "system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, placeholder := range []string{"{{ADAPTIVE_PACKS}}", "{{DOCUMENTATION_UNITS}}", "{{ADAPTIVE_PAGES}}", "{{PLAN_DECISIONS}}"} {
+		if strings.Contains(text, placeholder) {
+			t.Fatalf("unresolved %s", placeholder)
+		}
+	}
+}
+
+func TestAdaptivePromptSummaryIsBoundedAndPointsToCompleteArtifact(t *testing.T) {
+	plan := model.DocumentationPlan{}
+	for i := 0; i < 150; i++ {
+		plan.Pages = append(plan.Pages, model.PlanPage{Path: fmt.Sprintf("pages/%03d.md", i), View: "catalog", Kind: "single", Reason: "fixture"})
+	}
+	values := AdaptiveValues(model.DiscoveryManifest{}, plan)
+	if !strings.Contains(values["ADAPTIVE_PAGES"], "50 additional page(s)") {
+		t.Fatalf("summary was not bounded: %s", values["ADAPTIVE_PAGES"])
+	}
+	if values["PLAN_ARTIFACT"] == "" {
+		t.Fatal("missing complete plan artifact reference")
 	}
 }

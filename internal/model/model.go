@@ -3,15 +3,18 @@ package model
 import "time"
 
 type Component struct {
-	ID         string   `json:"id"`
-	Type       string   `json:"type"`
-	Profile    string   `json:"profile"`
-	Repository string   `json:"repository"`
-	Scope      string   `json:"scope,omitempty"`
-	WorkDir    string   `json:"workDir"`
-	Group      string   `json:"group,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	DependsOn  []string `json:"dependsOn,omitempty"`
+	ID           string   `json:"id"`
+	Type         string   `json:"type"`
+	Profile      string   `json:"profile"`
+	Repository   string   `json:"repository"`
+	Scope        string   `json:"scope,omitempty"`
+	WorkDir      string   `json:"workDir"`
+	Group        string   `json:"group,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	DependsOn    []string `json:"dependsOn,omitempty"`
+	Owners       []string `json:"owners,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Packs        []string `json:"packs,omitempty"`
 }
 
 type PageContract struct {
@@ -61,11 +64,13 @@ type PhaseStatus struct {
 }
 
 type TargetState struct {
-	GitHead    string                 `json:"gitHead,omitempty"`
-	DocsHash   string                 `json:"docsHash,omitempty"`
-	SourceHash string                 `json:"sourceHash,omitempty"`
-	Status     string                 `json:"status"`
-	Phases     map[string]PhaseStatus `json:"phases"`
+	GitHead       string                 `json:"gitHead,omitempty"`
+	DocsHash      string                 `json:"docsHash,omitempty"`
+	SourceHash    string                 `json:"sourceHash,omitempty"`
+	DiscoveryHash string                 `json:"discoveryHash,omitempty"`
+	PlanHash      string                 `json:"planHash,omitempty"`
+	Status        string                 `json:"status"`
+	Phases        map[string]PhaseStatus `json:"phases"`
 }
 
 type RunState struct {
@@ -78,4 +83,66 @@ type RunState struct {
 	// Services is retained to migrate v1 state files.
 	Services map[string]TargetState `json:"services,omitempty"`
 	System   TargetState            `json:"system"`
+}
+
+type DocumentationUnit struct {
+	ID           string   `json:"id"`
+	ComponentID  string   `json:"componentId"`
+	Kind         string   `json:"kind"`
+	SourceRoots  []string `json:"sourceRoots,omitempty"`
+	RelatedUnits []string `json:"relatedUnits,omitempty"`
+	OutputPath   string   `json:"outputPath,omitempty"`
+	Owners       []string `json:"owners,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Criticality  string   `json:"criticality,omitempty"`
+	Origin       string   `json:"origin"`
+}
+
+type EvidenceMatch struct {
+	Pack  string   `json:"pack"`
+	Paths []string `json:"paths"`
+	Count int      `json:"count"`
+}
+
+type DiscoveryManifest struct {
+	SchemaVersion int                 `json:"schemaVersion"`
+	Component     Component           `json:"component"`
+	SourceHash    string              `json:"sourceHash"`
+	FilesScanned  int                 `json:"filesScanned"`
+	BytesScanned  int64               `json:"bytesScanned"`
+	Packs         []string            `json:"packs"`
+	Evidence      []EvidenceMatch     `json:"evidence"`
+	Units         []DocumentationUnit `json:"units"`
+	Unknowns      []string            `json:"unknowns,omitempty"`
+}
+
+type PlanPage struct {
+	ID                 string   `json:"id"`
+	Path               string   `json:"path"`
+	View               string   `json:"view"`
+	Pack               string   `json:"pack,omitempty"`
+	UnitID             string   `json:"unitId,omitempty"`
+	Kind               string   `json:"kind"`
+	Reason             string   `json:"reason"`
+	ShardBy            []string `json:"shardBy,omitempty"`
+	MaximumRowsPerPage int      `json:"maximumRowsPerPage,omitempty"`
+}
+
+type PlanDecision struct {
+	Subject string `json:"subject"`
+	Action  string `json:"action"`
+	Reason  string `json:"reason"`
+}
+
+type DocumentationPlan struct {
+	SchemaVersion      int                 `json:"schemaVersion"`
+	ComponentID        string              `json:"componentId"`
+	Profile            string              `json:"profile"`
+	Views              []string            `json:"views"`
+	SelectedPacks      []string            `json:"selectedPacks"`
+	Units              []DocumentationUnit `json:"units"`
+	Pages              []PlanPage          `json:"pages"`
+	Decisions          []PlanDecision      `json:"decisions"`
+	ShardBy            []string            `json:"shardBy,omitempty"`
+	MaximumRowsPerPage int                 `json:"maximumRowsPerPage,omitempty"`
 }

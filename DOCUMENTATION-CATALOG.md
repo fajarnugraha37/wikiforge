@@ -1,6 +1,6 @@
-# WikiForge 1.2.3 Documentation Catalog
+# WikiForge Compatibility Renderer Documentation Catalog
 
-This document lists the specialized Markdown contracts enforced by WikiForge 1.2.3. Core profile documents remain in addition to these pages.
+This document lists the fixed Markdown contracts enforced by the backward-compatible profile renderer. Phase 1 additionally produces adaptive discovery and planning artifacts; Phase 2 will render the hierarchical plan directly. Core profile documents remain in addition to these pages.
 
 ## Component specialized pages
 
