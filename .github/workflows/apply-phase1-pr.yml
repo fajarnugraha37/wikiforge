@@ -22,7 +22,7 @@ jobs:
           ref: feat/phase1-adaptive-planning
           fetch-depth: 0
 
-      - name: Reconstruct patch parts
+      - name: Reconstruct and verify patch parts
         id: reconstruct
         env:
           GH_TOKEN: ${{ github.token }}
@@ -35,7 +35,29 @@ jobs:
           import traceback
           import urllib.request
 
-          diagnostics = {"found": [], "duplicates": [], "error": "", "digest": "", "bytes": 0}
+          metadata = {
+              1: (11949, "e42936d0757a309c027a6ead474add66ed828b56fce2486ae86d8de3cc96355c"),
+              2: (11977, "6858e4b1ebd23feacc1fac285ffbeaea09492a369d7b78e124efff542c8179f9"),
+              3: (11958, "1705a767be8d6fac1c679341ba7d84701cbf333422082ffa3219453a49f120df"),
+              4: (11921, "504a3e5fa73c2968ce9d3dde3cc19719b19ef9850677e6bfec010acfe4fac340"),
+              5: (11956, "e1c9195b623d49b6c38dd6baaadda08bb333e532d29f4b2fba7df2b231f647a3"),
+              6: (11989, "a5404ccf375689329bf0d4c5c8b56549ab246801b1879fd9302d4f5af4e62d7c"),
+              7: (11901, "71794f1bbf775deab2fab596adf18a68bcf9ce08c6e01902a71d31512b75a82f"),
+              8: (11917, "a9d541b2c3941962d620346fcb7238b3f65dc997670d4aa41ec976238663508a"),
+              9: (11969, "3856726bac0ec7b2de5be15fbdc47b1e8d623601cee7c5eb6562fa31a17d2a2a"),
+              10: (11970, "8ebf725590976a360496a3e24da5b19c0cb9a51df4685447ce773ea59fcc2dfa"),
+              11: (11932, "1ed4313e831419ef9c5ecbd191f271d64e818cab67a19f9714e7ae21191187eb"),
+              12: (11980, "6e8a7a6c6793c38601751974668f9b1023758a859a79a987747c96bee7a49297"),
+              13: (11917, "d5c10ac0541c3db00d0375a57158dd8a075c295e48733e306629d73121fb88a5"),
+              14: (11907, "4dedd23203bb43f80fb0221ab2f771848e38279d6ce59839cbd748d6c82fab5e"),
+              15: (11938, "db1b531b88e3d3287c0d2f1c203f59172dad1149ae6e790e351b3f3999d5511d"),
+              16: (11993, "2bccbd139b0266f3c4c8cd5e56196af4f8321dd32f1f0703719b5d971e323371"),
+              17: (11917, "8d3ccd13067314007de233f1ab49c9b7521f19c456b09e3d1c7e2836e1fd98d8"),
+              18: (11989, "8b7ad561ca68ab90bf5c3c2fee92e215eb344b6ef9307b3f7e09020b00ccacdc"),
+              19: (10795, "d6933559ce939af00080d8aee4ffe842e87f69d0fd9dd7fbe9984fdaef655f68"),
+          }
+          expected_patch_sha = "f6f9f6d66b62940c96650f95ee179837ddedbf45217e153f5289a36b59bb6513"
+          diagnostics = {"found": [], "duplicates": [], "partErrors": {}, "error": "", "digest": "", "bytes": 0}
           try:
               repo = os.environ["GITHUB_REPOSITORY"]
               token = os.environ["GH_TOKEN"]
@@ -64,7 +86,7 @@ jobs:
                           if number in parts:
                               diagnostics["duplicates"].append(number)
                           else:
-                              parts[number] = match.group(2)
+                              parts[number] = match.group(2).encode("utf-8")
                   if len(comments) < 100:
                       break
                   page += 1
@@ -75,9 +97,28 @@ jobs:
                   raise RuntimeError(f"duplicate patch parts: {diagnostics['duplicates']}")
               if sorted(parts) != expected:
                   raise RuntimeError(f"patch parts mismatch: found={sorted(parts)} expected={expected}")
-              patch = "".join(parts[number] for number in expected).encode("utf-8")
+
+              verified = []
+              for number in expected:
+                  expected_length, expected_sha = metadata[number]
+                  raw = parts[number]
+                  if len(raw) < expected_length:
+                      diagnostics["partErrors"][str(number)] = f"short: {len(raw)} < {expected_length}"
+                      continue
+                  candidate = raw[:expected_length]
+                  digest = hashlib.sha256(candidate).hexdigest()
+                  if digest != expected_sha:
+                      diagnostics["partErrors"][str(number)] = f"sha256={digest} expected={expected_sha} rawBytes={len(raw)}"
+                      continue
+                  verified.append(candidate)
+              if diagnostics["partErrors"]:
+                  raise RuntimeError(f"part verification failed: {diagnostics['partErrors']}")
+
+              patch = b"".join(verified)
               diagnostics["digest"] = hashlib.sha256(patch).hexdigest()
               diagnostics["bytes"] = len(patch)
+              if diagnostics["digest"] != expected_patch_sha:
+                  raise RuntimeError(f"patch sha256={diagnostics['digest']} expected={expected_patch_sha}")
               with open("/tmp/phase1.patch", "wb") as handle:
                   handle.write(patch)
           except Exception as exc:
