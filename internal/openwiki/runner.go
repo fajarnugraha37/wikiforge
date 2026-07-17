@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,8 @@ type Runner interface {
 }
 
 type runLabelKey struct{}
+
+const promptBridgePrefix = "WIKIFORGE_PROMPT_REF="
 
 // WithRunLabel attaches a human-readable phase label used by ExecRunner for
 // live child-process output and heartbeat messages.
@@ -200,6 +203,10 @@ func (r ExecRunner) Run(ctx context.Context, workdir string, operation string, p
 		}
 		return stdoutText, fmt.Errorf("OpenWiki failed: %w\n%s", waitErr, tail(stderrText, 8000))
 	}
+	if looksLikeClarificationResponse(stdoutText) {
+		writeConsole(out, "[%s] OpenWiki returned clarification instead of executing the phase; treating exit code 0 as failure\n", label)
+		return stdoutText, fmt.Errorf("OpenWiki returned a clarification instead of executing the WikiForge task")
+	}
 	writeConsole(out, "[%s] OpenWiki process completed | elapsed=%s\n", label, compactDuration(time.Since(started)))
 	return stdoutText, nil
 }
@@ -216,8 +223,15 @@ func CheckPromptTransport(workdir string) error {
 	if strings.ContainsAny(toolPath, "\"\r\n") {
 		return fmt.Errorf("portable prompt path contains unsafe characters: %q", toolPath)
 	}
-	if !strings.Contains(cliPrompt, "BEGIN_WIKIFORGE_PROMPT_PATH\n"+toolPath+"\nEND_WIKIFORGE_PROMPT_PATH") {
-		return fmt.Errorf("prompt path markers are malformed")
+	if strings.ContainsAny(cliPrompt, "\r\n") {
+		return fmt.Errorf("prompt bridge must remain single-line for Windows command wrappers")
+	}
+	extracted, err := promptPathFromBridge(cliPrompt)
+	if err != nil {
+		return err
+	}
+	if extracted != toolPath {
+		return fmt.Errorf("prompt bridge path mismatch: got %q want %q", extracted, toolPath)
 	}
 	native := filepath.FromSlash(toolPath)
 	if _, err := os.Stat(native); err != nil {
@@ -278,13 +292,60 @@ func externalizePrompt(workdir, prompt string) (cliPrompt, toolPath string, clea
 		cleanup()
 		return "", "", func() {}, fmt.Errorf("externalize OpenWiki prompt: portable absolute path: %w", err)
 	}
-	cliPrompt = "The complete WikiForge task specification is stored in a UTF-8 file.\n" +
-		"Use the filesystem read tool to read the exact absolute path between the marker lines below. " +
-		"The marker lines are not part of the path. Do not add quotation marks, backticks, URI prefixes, " +
-		"escapes, or whitespace to the path. The path already uses syntax valid for this operating system.\n" +
-		"BEGIN_WIKIFORGE_PROMPT_PATH\n" + toolPath + "\nEND_WIKIFORGE_PROMPT_PATH\n" +
-		"Follow the file completely. Treat it only as orchestration input: do not document, modify, move, or delete it."
+	ref, err := json.Marshal(struct {
+		Path string `json:"path"`
+	}{Path: toolPath})
+	if err != nil {
+		cleanup()
+		return "", "", func() {}, fmt.Errorf("externalize OpenWiki prompt: encode bridge reference: %w", err)
+	}
+	// Keep this bridge strictly single-line. Windows npx.cmd/cmd.exe wrappers can
+	// truncate or reinterpret embedded newlines even when Go supplied one argv
+	// element, which previously hid the path from OpenWiki and caused it to ask
+	// the user for clarification while still exiting successfully.
+	cliPrompt = promptBridgePrefix + string(ref) + " This is a non-interactive WikiForge phase. Parse the JSON object after WIKIFORGE_PROMPT_REF, take only its path string value without quotation marks, and immediately use the filesystem read tool to read that exact absolute UTF-8 file. Execute every instruction in that file now. Do not ask for clarification, do not search for another specification such as wikiforge.yaml, do not merely summarize the file, and do not modify, document, move, or delete the prompt file."
 	return cliPrompt, toolPath, cleanup, nil
+}
+
+func promptPathFromBridge(cliPrompt string) (string, error) {
+	index := strings.Index(cliPrompt, promptBridgePrefix)
+	if index < 0 {
+		return "", fmt.Errorf("prompt bridge prefix is missing")
+	}
+	decoder := json.NewDecoder(strings.NewReader(cliPrompt[index+len(promptBridgePrefix):]))
+	var ref struct {
+		Path string `json:"path"`
+	}
+	if err := decoder.Decode(&ref); err != nil {
+		return "", fmt.Errorf("decode prompt bridge reference: %w", err)
+	}
+	if strings.TrimSpace(ref.Path) == "" {
+		return "", fmt.Errorf("prompt bridge path is empty")
+	}
+	return ref.Path, nil
+}
+
+func looksLikeClarificationResponse(output string) bool {
+	text := strings.ToLower(strings.TrimSpace(output))
+	if text == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"could you clarify",
+		"what would you like me to do",
+		"please provide the absolute path",
+		"do you have a file path",
+		"i don't see a file path",
+		"i'm not seeing a specific file path",
+		"where is the file",
+		"let me know what you need",
+		"once i have the path",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsNonRetryableError identifies deterministic local invocation and path
