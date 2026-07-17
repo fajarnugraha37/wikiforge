@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/wikiforge-config.schema.json",
+  "title": "WikiForge Configuration",
+  "type": "object",
+  "required": [
+    "version",
+    "openwiki"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "workspace": {
+      "type": "string"
+    },
+    "openwiki": {
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "timeoutMinutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "properties": {
+        "parallelComponents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "parallelServices": {
+          "type": "integer",
+          "minimum": 1,
+          "deprecated": true
+        },
+        "maxProcessRetries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxRepairRounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "continueOnComponentFailure": {
+          "type": "boolean"
+        },
+        "continueOnServiceFailure": {
+          "type": "boolean",
+          "deprecated": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "documentation": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string",
+          "minLength": 1
+        },
+        "minimumQualityScore": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "minimumPages": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requireFrontMatter": {
+          "type": "boolean"
+        },
+        "requireSourceReferences": {
+          "type": "boolean"
+        },
+        "validateSourcePaths": {
+          "type": "boolean"
+        },
+        "requireMermaid": {
+          "type": "boolean"
+        },
+        "minimumMermaidBlocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allowedDiagramTypes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "mermaid": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "basic",
+            "render",
+            "off"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/component"
+      }
+    },
+    "services": {
+      "type": "array",
+      "deprecated": true,
+      "items": {
+        "$ref": "#/$defs/legacyService"
+      }
+    },
+    "system": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "factsPath": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "components"
+      ]
+    },
+    {
+      "required": [
+        "services"
+      ]
+    }
+  ],
+  "$defs": {
+    "component": {
+      "type": "object",
+      "required": [
+        "id",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Built-in types auto-select a profile; custom types may use an explicit profile and otherwise fall back to generic."
+        },
+        "profile": {
+          "enum": [
+            "application",
+            "modular-application",
+            "reusable",
+            "infrastructure",
+            "configuration",
+            "contracts",
+            "generic"
+          ]
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "deprecated": true
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "includeInSystem": {
+          "type": "boolean"
+        },
+        "group": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": [
+                "repository"
+              ]
+            },
+            {
+              "required": [
+                "path"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "legacyService": {
+      "type": "object",
+      "required": [
+        "id",
+        "path"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

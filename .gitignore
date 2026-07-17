@@ -1,0 +1,7 @@
+/wikiforge
+/dist/
+/.wikiforge/
+/enterprise-wiki/
+*.exe
+*.test
+.DS_Store

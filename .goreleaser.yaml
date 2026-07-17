@@ -1,0 +1,23 @@
+version: 2
+project_name: wikiforge
+builds:
+  - id: wikiforge
+    main: ./cmd/wikiforge
+    binary: wikiforge
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - examples/*
+checksum:
+  name_template: checksums.txt
+changelog:
+  use: git
