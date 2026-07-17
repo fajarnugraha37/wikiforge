@@ -102,6 +102,16 @@ jobs:
               for number in expected:
                   expected_length, expected_sha = metadata[number]
                   raw = parts[number]
+                  # GitHub issue comments remove a terminal newline. Two manually
+                  # transported Markdown/JSON chunks also normalized indentation
+                  # to tabs. These exact, observed transport transformations are
+                  # reversed before the immutable per-part hashes are checked.
+                  if number == 16:
+                      raw = raw.replace(b"\t", b"")
+                  elif number == 19:
+                      raw = raw.replace(b"\t", b"    ")
+                  if len(raw) == expected_length - 1:
+                      raw += b"\n"
                   if len(raw) < expected_length:
                       diagnostics["partErrors"][str(number)] = f"short: {len(raw)} < {expected_length}"
                       continue
