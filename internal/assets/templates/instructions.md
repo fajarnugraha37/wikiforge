@@ -48,4 +48,27 @@ Classify important information as **Verified**, **Derived**, **Unknown**, or **C
 - Stay within the configured repository scope unless a referenced neighbour is required to explain an interaction.
 
 Documentation language: {{LANGUAGE}}
+## Adaptive planning context
+
+Full deterministic artifacts:
+
+- discovery: `{{DISCOVERY_ARTIFACT}}`
+- plan: `{{PLAN_ARTIFACT}}`
+
+Selected capability packs:
+
+{{ADAPTIVE_PACKS}}
+
+Documentation units:
+
+{{DOCUMENTATION_UNITS}}
+
+Planned adaptive pages for the future hierarchical layout:
+
+{{ADAPTIVE_PAGES}}
+
+Planning decisions:
+
+{{PLAN_DECISIONS}}
+
 <!-- WIKIFORGE:END -->

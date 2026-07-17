@@ -24,3 +24,23 @@ Mandatory operating rules:
 Output language: {{LANGUAGE}}
 Target component/system: {{TARGET_ID}}
 Documentation root: openwiki/
+Adaptive planning context for this target:
+
+Full deterministic artifacts:
+
+- discovery: `{{DISCOVERY_ARTIFACT}}`
+- plan: `{{PLAN_ARTIFACT}}`
+
+Selected capability packs:
+{{ADAPTIVE_PACKS}}
+
+Documentation units:
+{{DOCUMENTATION_UNITS}}
+
+Future adaptive pages:
+{{ADAPTIVE_PAGES}}
+
+Planning decisions:
+{{PLAN_DECISIONS}}
+
+Use this context to focus evidence collection and preserve domain, component, flow, catalog, platform, engineering, and operations boundaries. The current compatibility renderer must still honor the owned page contract for the active phase.

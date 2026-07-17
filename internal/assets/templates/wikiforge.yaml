@@ -1,13 +1,9 @@
-version: 2
+version: 3
 workspace: .
 
 openwiki:
-  # Pinned for reproducible runs. Replace with your approved command/model.
   command: npx
-  args:
-    - --yes
-    - openwiki@0.2.0
-    - code
+  args: [--yes, openwiki@0.2.0, code]
   modelId: ""
   timeoutMinutes: 60
   environment:
@@ -15,8 +11,6 @@ openwiki:
     OPENWIKI_PROVIDER_RETRY_ATTEMPTS: "3"
 
 execution:
-  # Different repositories may run concurrently. Components sharing one
-  # repository are automatically serialized, which is safe for monorepos.
   parallelComponents: 2
   maxProcessRetries: 2
   maxRepairRounds: 2
@@ -25,99 +19,67 @@ execution:
 documentation:
   language: English
   minimumQualityScore: 85
-  # 0 = use the selected component profile's built-in contract.
   minimumPages: 0
   requireFrontMatter: true
   requireSourceReferences: true
   validateSourcePaths: true
   requireMermaid: true
-  # 0 = use the selected component profile's built-in minimum.
   minimumMermaidBlocks: 0
-  allowedDiagramTypes:
-    - flowchart
-    - sequenceDiagram
-    - stateDiagram-v2
-    - erDiagram
-    - classDiagram
-    - architecture-beta
-    - gitGraph
-    - mindmap
+  allowedDiagramTypes: [flowchart, sequenceDiagram, stateDiagram-v2, erDiagram, classDiagram, architecture-beta, gitGraph, mindmap]
+  # Phase 1 planning views. Phase 2 will render this hierarchy directly.
+  views: [system, domain, component, flow, catalog, platform, engineering, operations]
+  catalogs:
+    shardBy: [domain, owner]
+    maximumRowsPerPage: 150
+  evidence:
+    include: ["**"]
+    exclude: [.git/**, .wikiforge/**, openwiki/**, vendor/**, node_modules/**, dist/**, build/**, target/**, generated/**, .wikiforge-prompt-*.md, "**/*.bin"]
+    maxFileSizeBytes: 2097152
 
 mermaid:
-  # render = parse every Mermaid block with the pinned official CLI.
-  # basic = offline structural checks only.
-  # off = do not validate Mermaid.
   mode: render
   command: npx
-  args:
-    - --yes
-    - "@mermaid-js/mermaid-cli@11.12.0"
-    - -i
-    - "{input}"
-    - -o
-    - "{output}"
-    - --quiet
+  args: [--yes, "@mermaid-js/mermaid-cli@11.12.0", -i, "{input}", -o, "{output}", --quiet]
   timeoutSeconds: 90
 
-# A component is any independently documented repository scope. Multiple
-# components may share one repository by using different relative scopes.
 components:
-  # Conventional microservice repository.
-  - id: order-service
-    type: microservice
-    repository: ./repositories/order-service
-    enabled: false
-    group: commerce
-    tags: [order, deployable]
-    dependsOn: [shared-contracts]
-
-  # Entire monolith repository.
-  - id: legacy-commerce
-    type: monolith
-    repository: ./repositories/legacy-commerce
-    enabled: false
-
-  # Modular monolith with module-aware documentation.
   - id: commerce-core
     type: modular-monolith
     repository: ./repositories/commerce-core
-    enabled: false
-
-  # Multiple scoped components inside one monorepo.
-  - id: catalog-app
-    type: microservice
-    repository: ./repositories/platform-monorepo
-    scope: apps/catalog
-    enabled: false
+    enabled: true
+    owners: [commerce-team]
+    capabilities: [order-management, pricing, fulfilment]
+    # Explicit packs are composed with profile defaults and discovered packs.
+    packs: [workflow, messaging, database, migrations]
 
   - id: shared-runtime
     type: framework
     repository: ./repositories/platform-monorepo
     scope: packages/runtime
     enabled: false
+    owners: [platform-team]
+    packs: [concurrency, telemetry]
 
-  - id: shared-contracts
-    type: contracts
-    repository: ./repositories/platform-monorepo
-    scope: contracts
-    enabled: false
+documentationUnits:
+  - id: order-management
+    component: commerce-core
+    kind: domain
+    sourceRoots: [modules/order, workflows/order]
+    output: domains/order-management
+    owners: [commerce-team]
+    capabilities: [order-management]
+    criticality: high
 
-  # Infrastructure/IaC/GitOps repository.
-  - id: production-infrastructure
-    type: iac
-    repository: ./repositories/production-infrastructure
-    enabled: false
-
-  # Shared configuration repository.
-  - id: platform-configuration
-    type: configuration
-    repository: ./repositories/platform-configuration
-    enabled: false
+  - id: submit-order
+    component: commerce-core
+    kind: flow
+    sourceRoots: [workflows/order/submit-order.bpmn]
+    relatedUnits: [order-management]
+    output: flows/submit-order
 
 system:
   enabled: true
   id: enterprise-system
   title: Enterprise System
   output: ./enterprise-wiki
-  # Optional human-authored facts copied into the aggregation workspace.
   factsPath: ./facts

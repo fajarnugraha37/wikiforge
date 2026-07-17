@@ -1,171 +1,232 @@
 ---
 type: Reference
 title: WikiForge Configuration Model
-description: YAML/JSON configuration schema, component types, profile selection, path normalization, and validation rules
-tags: [configuration, yaml, components, profiles]
+description: Configuration v3, compatibility migration, components, documentation units, views, capability packs, evidence boundaries, and validation
+tags: [configuration, yaml, components, documentation-units, adaptive-planning]
 resource: /internal/config/config.go
 ---
 
 # Configuration Model
 
-WikiForge uses a YAML or JSON configuration file (default `wikiforge.yaml`) with a version 2 schema and backward-compatible v1 migration.
+WikiForge loads YAML or JSON from `wikiforge.yaml` by default. The normalized in-memory model is version 3. Version 1 `services` and version 2 `components` remain accepted and are converted before validation.
 
 ## Config structure
 
-The top-level [`Config` struct](/internal/config/config.go) has these sections:
-
 ```yaml
-version: 2                # 1 or 2 (v1 services are migrated to components)
-workspace: .              # working directory root
-openwiki: { ... }         # OpenWiki command, args, timeout, environment
-execution: { ... }        # parallelism, retries, repair rounds, failure policy
-documentation: { ... }    # quality thresholds, validation toggles
-mermaid: { ... }          # Mermaid CLI config (render/basic/off mode)
-components: [ ... ]       # component definitions
-system: { ... }           # whole-system aggregation config
+version: 3
+workspace: .
+openwiki: { ... }
+execution: { ... }
+documentation:
+  language: English
+  views: [system, domain, component, flow, catalog, platform, engineering, operations]
+  catalogs:
+    shardBy: [domain, owner]
+    maximumRowsPerPage: 150
+  evidence:
+    include: ["**"]
+    exclude: [.git/**, .wikiforge/**, openwiki/**, vendor/**, node_modules/**, generated/**]
+    maxFileSizeBytes: 2097152
+mermaid: { ... }
+components: [ ... ]
+documentationUnits: [ ... ]
+system: { ... }
 ```
 
-### OpenWiki config
+## OpenWiki config
 
 | Field | Default | Description |
 |---|---|---|
 | `command` | `npx` | OpenWiki executable |
-| `args` | `["--yes", "openwiki@0.2.0", "code"]` | CLI arguments |
-| `modelId` | `""` | Override OpenWiki model ID |
-| `timeoutMinutes` | `60` | Per-phase timeout |
-| `environment` | `{OPENWIKI_TELEMETRY_DISABLED: "1", OPENWIKI_PROVIDER_RETRY_ATTEMPTS: "3"}` | Extra env vars |
+| `args` | `--yes openwiki@0.2.0 code` | Child-process arguments |
+| `modelId` | empty | Optional model override |
+| `timeoutMinutes` | `60` | Timeout per process |
+| `environment` | telemetry disabled, provider retries `3` | Additional environment variables |
 
-### Execution config
+## Execution config
+
+| Field | Default | Description |
+|---|---:|---|
+| `parallelComponents` | 2 | Maximum repository groups processed concurrently |
+| `maxProcessRetries` | 2 | Additional retry attempts for retryable child-process failures |
+| `maxRepairRounds` | 2 | Maximum targeted validation-repair rounds |
+| `continueOnComponentFailure` | true | Continue processing independent components after failure |
+
+Legacy `parallelServices` and `continueOnServiceFailure` are read and normalized.
+
+## Documentation config
+
+The existing quality and Mermaid-related fields remain. Version 3 adds the planning fields below.
+
+### Views
+
+Supported values:
+
+- `system`;
+- `domain`;
+- `component`;
+- `flow`;
+- `catalog`;
+- `platform`;
+- `engineering`;
+- `operations`.
+
+Disabling a view does not silently discard a selected capability. The planner records a `defer` decision for pages or units that require that view. `quickstart.md` remains planned as the bounded component entry point even when the detailed component view is disabled.
+
+### Catalog policy
 
 | Field | Default | Description |
 |---|---|---|
-| `parallelComponents` | `2` | Max concurrent component groups |
-| `maxProcessRetries` | `2` | Max retries per phase process |
-| `maxRepairRounds` | `2` | Max validation/repair cycles |
-| `continueOnComponentFailure` | `true` | Keep going after component failure |
+| `shardBy` | `domain`, `owner` | Future collection partition dimensions |
+| `maximumRowsPerPage` | `150` | Future maximum rows before a collection is sharded |
 
-### Documentation config
+Supported shard dimensions are `domain`, `subdomain`, `bounded-context`, `component`, `owner`, `repository`, `runtime`, `transport`, `data-store`, and `criticality`.
 
-| Field | Default | Description |
-|---|---|---|
-| `language` | `English` | Documentation language |
-| `minimumQualityScore` | `85` | Minimum validation score to accept |
-| `requireFrontMatter` | `true` | Enforce OpenWiki front matter |
-| `requireSourceReferences` | `true` | Enforce source reference sections |
-| `validateSourcePaths` | `true` | Verify source paths resolve in scope |
-| `allowedDiagramTypes` | 9 types | Permitted Mermaid diagram types |
-
-### Mermaid config
+### Evidence policy
 
 | Field | Default | Description |
 |---|---|---|
-| `mode` | `render` | `render` (CLI render), `basic` (offline checks), or `off` |
-| `command` | `npx` | Mermaid CLI command |
-| `args` | `["--yes", "@mermaid-js/mermaid-cli@11.12.0", "-i", "{input}", "-o", "{output}", "--quiet"]` | Mermaid args with `{input}`/`{output}` placeholders |
-| `timeoutSeconds` | `90` | Per-diagram render timeout |
+| `include` | `**` | Relative globs eligible for deterministic discovery |
+| `exclude` | Git, WikiForge, generated, dependency, and build directories | Relative globs excluded from discovery |
+| `maxFileSizeBytes` | 2 MiB | Per-file scan guard |
+
+Discovery does not follow symbolic links and skips binary or oversized files. A missing component root is an error; an unreadable child path is recorded as an unknown evidence gap.
 
 ## Component configuration
 
 ```yaml
 components:
-  - id: order-service
-    type: microservice
-    repository: ./repositories/order-service
+  - id: commerce-core
+    type: modular-monolith
+    repository: ./repositories/commerce-core
+    scope: .
     enabled: true
+    includeInSystem: true
     group: commerce
-    tags: [order, deployable]
+    tags: [core]
     dependsOn: [shared-contracts]
-    scope: ""                       # empty = repository root
-    includeInSystem: true           # default: true
+    owners: [commerce-team]
+    capabilities: [order-management, pricing]
+    packs: [workflow, messaging, database]
 ```
 
-### Component types and profile mapping
+`repository` and `scope` define the runtime source boundary. They do not define the documentation decomposition.
 
-| Type | Profile | Description |
-|---|---|---|
-| `monolith`, `microservice`, `worker`, `gateway`, `frontend`, `cli` | `application` | Deployable application |
-| `modular-monolith` | `modular-application` | Modular monolith with module docs |
-| `library`, `shared-library`, `internal-library`, `framework`, `sdk` | `reusable` | Library, SDK, framework |
-| `iac`, `infrastructure`, `gitops`, `deployment`, `platform` | `infrastructure` | IaC, GitOps, platform |
-| `configuration`, `shared-config`, `config` | `configuration` | Shared config/policy |
-| `contract`, `contracts`, `schema`, `schemas` | `contracts` | API/event/data schemas |
-| `generic`, `repository` | `generic` | Unclassified fallback |
+### Type-to-profile mapping
 
-## Profiles
+| Types | Profile |
+|---|---|
+| `monolith`, `microservice`, `worker`, `gateway`, `frontend`, `cli` | `application` |
+| `modular-monolith` | `modular-application` |
+| `library`, `shared-library`, `internal-library`, `framework`, `sdk` | `reusable` |
+| `iac`, `infrastructure`, `gitops`, `deployment`, `platform` | `infrastructure` |
+| `configuration`, `shared-config`, `config` | `configuration` |
+| `contract`, `contracts`, `schema`, `schemas` | `contracts` |
+| `generic`, `repository` | `generic` |
 
-Seven documentation profiles each define a set of phases with required output files, sections, and diagram types. Profile definitions are in [`internal/prompts/profiles.go`](/internal/prompts/profiles.go).
+An explicit `profile` may override the type mapping when it names a supported profile.
 
-### Phase structure
+## Documentation units
 
-Each phase has:
-- **ID** (e.g., `A10`, `M25`, `I70`)
-- **Name** (e.g., "Architecture", "Domain behaviour")
-- **Output file** (e.g., `architecture/overview.md`)
-- **Objective** — Describes the phase purpose
-- **Required headings** — Exact section headings to include
-- **Required diagram type** — Mermaid diagram contract (`flowchart`, `sequenceDiagram`, `erDiagram`, `classDiagram`, or `any`)
-- **Page contracts** — For specialized catalog phases
+```yaml
+documentationUnits:
+  - id: order-management
+    component: commerce-core
+    kind: domain
+    sourceRoots: [modules/order, workflows/order]
+    relatedUnits: [pricing, fulfilment/dispatch]
+    output: domains/order-management
+    owners: [commerce-team]
+    capabilities: [order-management]
+    criticality: high
+```
 
-### Phase IDs by profile
+Supported kinds are `domain`, `subdomain`, `bounded-context`, `component`, `module`, `flow`, `platform`, and `catalog`.
 
-Every profile follows the pattern:
-- `{PREFIX}00` — Bootstrap and quickstart
-- `{PREFIX}10–{PREFIX}70` — Core phases
-- `{PREFIX}S01–{PREFIX}SNN` — Specialized catalog batches (inserted before consolidate)
-- `{PREFIX}C90` — Consolidate/relationship audit
+Invariants:
 
-Prefixes: A (application), M (modular-application), R (reusable), I (infrastructure), C (configuration), K (contracts), G (generic).
+- IDs are unique within a component, not globally;
+- cross-component relations use `component/unit` when necessary;
+- a unit must reference an enabled component;
+- relative source roots and output paths cannot escape through `..` or absolute paths;
+- two units in one component cannot claim the same configured output;
+- criticality is empty, `low`, `medium`, `high`, or `critical`;
+- explicit units take precedence over inferred units covered by the same source root.
 
-### Profile contracts
+## Capability packs
 
-| Profile | Core pages | Specialized pages | Total canonical pages | Minimum Mermaid blocks |
-|---|---|---|---|---|
-| `application` | 8 | 22 | 30 | 5 |
-| `modular-application` | 9 | 22 | 31 | 6 |
-| `reusable` | 8 | 19 | 27 | 5 |
-| `infrastructure` | 8 | 15 | 23 | 5 |
-| `configuration` | 8 | 11 | 19 | 5 |
-| `contracts` | 8 | 10 | 18 | 5 |
-| `generic` | 8 | 22 | 30 | 5 |
+Supported packs:
+
+```text
+api, cache, concurrency, configuration, container-runtime, cryptography,
+data-access, database, distributed-coordination, domain, engineering,
+files, jobs, messaging, migrations, rate-limit, runtime, security,
+telemetry, workflow
+```
+
+The adaptive planner unions profile defaults, explicit `components[].packs`, and discovered packs. Every registered pack has a canonical planning mapping and an include, skip, or defer decision.
 
 ## Path normalization
 
-When loading a configuration, WikiForge normalizes all paths:
+- `workspace`, component repositories, system output, and facts paths become absolute paths relative to the config file.
+- `scope`, unit source roots, and unit outputs remain normalized relative paths.
+- portable component and unit IDs are enforced across Windows, Linux, and macOS.
+- `config migrate` emits paths relative to the output config location when possible, avoiding machine-specific absolute paths.
 
-1. **Workspace** — Resolved to absolute path relative to config file directory.
-2. **Repository** — Same resolution, supports repo-relative and absolute paths.
-3. **Scope** — Normalized with `pathutil.NormalizeRelative`: accepts `/` or `\`, rejects absolute paths and parent escapes.
-4. **System output** — Resolved to absolute path.
-5. **Facts path** — Resolved if non-empty.
+## Compatibility migration
 
-The `ComponentConfig.WorkDir()` method returns `{repository}/{scope}` (or just `{repository}` if scope is empty). The `DocumentationRoot()` method returns `{workdir}/openwiki`.
+```text
+version 1 services -> microservice components -> normalized version 3
+version 2 components -> normalized version 3 defaults
+version 3 -> normalized and validated version 3
+```
 
-## Configuration validation
+Use:
 
-[`config.Validate()`](/internal/config/config.go) checks:
+```bash
+wikiforge config migrate --config wikiforge.yaml --output wikiforge.v3.json
+```
 
-- Version is 1 or 2
-- All components have non-empty IDs
-- OpenWiki command is non-empty
-- Documentation minimum quality score is 0–100
-- Mermaid timeout is positive
-- Component IDs are portable path segments (no spaces, special chars, etc.)
+The command refuses to replace an existing output unless `--force` is provided. The generated JSON is reloadable by WikiForge.
 
-## V1 backward compatibility
+## Validation
 
-Configs with `version: 1` or legacy `services` array are migrated:
-- `version: 0` (unset) → treated as v1
-- Each `services[].{id, path, enabled}` is converted to `components[]` with `type: microservice`
+`config.Validate` enforces:
+
+- current normalized version;
+- at least one enabled component;
+- portable and unique component IDs;
+- valid profiles, packs, views, unit kinds, criticalities, and shard dimensions;
+- unique component work directories;
+- valid dependency and related-unit references;
+- safe relative scopes, source roots, and output paths;
+- positive catalog and evidence limits;
+- required system output when system aggregation is enabled;
+- valid Mermaid mode.
+
+The published Draft 2020-12 schema is [`/schema/wikiforge-config.schema.json`](/schema/wikiforge-config.schema.json). Tests prevent the schema pack/view enums from drifting from the Go registry and load all published version 3 examples through the production parser.
 
 ## Source map
 
 | File | Role |
 |---|---|
-| `/internal/config/config.go` | Config struct, defaults, loading, validation, normalization |
-| `/internal/config/yaml.go` | Custom indentation-based YAML subset parser |
-| `/internal/config/config_test.go` | Config loading and normalization tests |
-| `/schema/wikiforge-config.schema.json` | JSON Schema |
-| `/wikiforge.example.yaml` | Example config with all component types |
-| `/internal/prompts/profiles.go` | All 7 profile definitions with phase contracts |
-| `/internal/prompts/supplements.go` | Specialized catalog page contracts |
-| `/internal/pathutil/pathutil.go` | Cross-platform path normalization utilities |
+| `/internal/config/config.go` | Model, defaults, normalization, migration, validation |
+| `/internal/config/yaml.go` | Dependency-free YAML subset parser |
+| `/internal/config/config_test.go` | Compatibility and configuration invariant tests |
+| `/internal/config/schema_test.go` | JSON Schema registry-drift tests |
+| `/schema/wikiforge-config.schema.json` | Draft 2020-12 schema |
+| `/wikiforge.example.yaml` | Version 3 example |
+| `/internal/discovery/discovery.go` | Evidence-bound deterministic discovery |
+| `/internal/planner/planner.go` | Adaptive plan construction |
+
+## Knowledge Gaps
+
+The schema validates shape and enumerated values but cannot validate filesystem existence or Git work-tree status. `wikiforge doctor` performs those environmental checks, including configured documentation-unit source roots.
+
+## Source References
+
+- `/internal/config/config.go`
+- `/internal/config/config_test.go`
+- `/internal/config/schema_test.go`
+- `/schema/wikiforge-config.schema.json`
+- `/internal/cli/cli.go`

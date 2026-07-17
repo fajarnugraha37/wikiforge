@@ -1,12 +1,18 @@
 # Build Verification
 
-Release: `1.2.3`
+Build: `1.3.0` — Phase 1 adaptive-planning foundation
 
 ## Verified in this build environment
 
-- `go test ./...`
-- `go test -race ./...`
+- `go test -count=1 ./...`
+- `go test -race -count=1 ./...`
 - `go vet ./...`
+- Configuration v3 normalization with v1/v2 compatibility and reloadable migration output.
+- Deterministic discovery manifests with include/exclude globs, file-size and binary guards, symlink avoidance, nested module/domain inference, BPMN flow inference, and configured-unit precedence.
+- Adaptive planner coverage for every registered capability pack, all documentation views, documentation-unit outputs, explicit collision decisions, catalog shard policy, and whole-system aggregation.
+- CLI coverage for `discover`, `plan --explain`, `config migrate`, unknown-component failures, and deterministic artifact persistence.
+- Last-successful source, documentation, discovery, and plan checkpoints survive failed generation attempts.
+- Published v3 YAML examples parse through WikiForge and validate against the Draft 2020-12 JSON Schema.
 - OpenWiki executable runner contract tests:
   - `--init --print`;
   - `--update --print`;

@@ -6,7 +6,7 @@ WikiForge intentionally does **not** parse programming languages, frameworks, Ia
 
 ## Supported repository scenarios
 
-WikiForge 1.2.3 is component-centric. A component may be an entire repository or a scoped directory inside a monorepo.
+WikiForge is component-centric. A component may be an entire repository or a scoped directory inside a monorepo.
 
 | Scenario | Component type | Documentation profile |
 |---|---|---|
@@ -55,8 +55,13 @@ Different Git repositories may run concurrently. Components sharing the same Git
 
 - Native cross-platform Go CLI.
 - YAML or JSON configuration.
-- Config v2 component model with backward-compatible v1 `services` migration.
+- Config v3 adaptive-planning model with backward-compatible v1 `services` and v2 component migration.
 - Repository-root and monorepo-scoped components.
+- Explicit documentation units for domains, subdomains, bounded contexts, modules, flows, platform areas, and catalogs.
+- Composable capability packs selected from profile defaults, explicit configuration, and deterministic source discovery.
+- Deterministic discovery manifests and adaptive documentation plans persisted under `.wikiforge/components/<id>/`.
+- Configurable domain/component/flow/catalog/platform/engineering/operations views, evidence include/exclude rules, and catalog shard policy.
+- `discover`, `plan --explain`, and `config migrate` CLI workflows.
 - Profile-specific phased generation for seven repository classes.
 - Bounded parallelism across repositories and automatic serialization within a monorepo.
 - Persistent profile-aware `openwiki/INSTRUCTIONS.md` contracts.
@@ -80,9 +85,11 @@ Different Git repositories may run concurrently. Components sharing the same Git
 - JSONL knowledge graph export for document links and standardized relationship tables.
 - End-to-end tests covering every profile, mixed repository types, monorepo scopes, whole-system generation, and same-repository serialization.
 
+The detailed Phase 1 architecture, invariants, CLI behavior, and verification scope are documented in [`PHASE-1-ADAPTIVE-PLANNING.md`](PHASE-1-ADAPTIVE-PLANNING.md).
+
 ## Live progress and long-running phases
 
-WikiForge 1.2.3 no longer appears frozen while OpenWiki is working. Every generation displays a line-based progress bar with the component, phase ID, completed percentage, step number, status, and elapsed time. The percentage is based on completed deterministic WikiForge steps; it does not invent model-token progress inside a single OpenWiki call.
+WikiForge does not appear frozen while OpenWiki is working. Every generation displays a line-based progress bar with the component, phase ID, completed percentage, step number, status, and elapsed time. The percentage is based on completed deterministic WikiForge steps; it does not invent model-token progress inside a single OpenWiki call.
 
 Example:
 
@@ -128,14 +135,14 @@ Provider credentials required by the selected OpenWiki model must be available a
 Windows:
 
 ```powershell
-Expand-Archive .\wikiforge-1.2.3-windows-amd64.zip
-cd .\wikiforge-1.2.3-windows-amd64
+Expand-Archive .\wikiforge-<version>-windows-amd64.zip
+cd .\wikiforge-<version>-windows-amd64
 ```
 
 Linux/macOS:
 
 ```bash
-unzip wikiforge-1.2.3-linux-amd64.zip
+unzip wikiforge-<version>-linux-amd64.zip
 cd linux-amd64
 ```
 
@@ -179,11 +186,14 @@ $env:OPENWIKI_MODEL_ID = "cheap-code-model"
 ./wikiforge profiles
 ```
 
-### 6. Preview the exact phase plan
+### 6. Discover capabilities and preview the adaptive plan
 
 ```bash
-./wikiforge plan
+./wikiforge discover
+./wikiforge plan --explain
 ```
+
+Discovery and planning are deterministic for the same normalized configuration and source content. They write `.wikiforge/components/<component-id>/discovery.json` and `plan.json`. The existing profile renderer consumes this context while Phase 2 introduces the hierarchical physical layout.
 
 ### 7. Generate all component wikis and the whole-system wiki
 
@@ -211,7 +221,9 @@ WikiForge hashes each configured component scope independently. A change elsewhe
 wikiforge init [--config wikiforge.yaml] [--force]
 wikiforge doctor [--config wikiforge.yaml]
 wikiforge profiles
-wikiforge plan [--config wikiforge.yaml] [--component ID] [--skip-system]
+wikiforge config migrate [--config wikiforge.yaml] [--output wikiforge.v3.json] [--force]
+wikiforge discover [--config wikiforge.yaml] [--component ID]
+wikiforge plan [--config wikiforge.yaml] [--component ID] [--skip-system] [--explain]
 wikiforge generate [--config wikiforge.yaml] [--component ID] [--skip-system] [--resume]
 wikiforge update [--config wikiforge.yaml] [--component ID] [--skip-system]
 wikiforge resume [--config wikiforge.yaml]
@@ -234,6 +246,9 @@ components:
     group: commerce
     tags: [core, deployable]
     dependsOn: [shared-contracts]
+    owners: [commerce-team]
+    capabilities: [order-management, pricing]
+    packs: [workflow, messaging, database]
 ```
 
 Fields:
@@ -247,9 +262,47 @@ Fields:
 - `includeInSystem`: whether its generated wiki is included in whole-system aggregation;
 - `group`: optional logical grouping;
 - `tags`: optional classification;
-- `dependsOn`: optional declared component dependencies included in the system manifest.
+- `dependsOn`: optional declared component dependencies included in the system manifest;
+- `owners`: optional ownership hints used by planning and future catalog sharding;
+- `capabilities`: business capabilities that become configured domain documentation units;
+- `packs`: capability packs composed with profile defaults and source-discovered packs.
 
 `scope` must be relative and cannot escape the repository.
+
+### Documentation units
+
+A documentation unit is deliberately separate from a deployable component:
+
+```yaml
+documentationUnits:
+  - id: order-management
+    component: commerce-core
+    kind: domain
+    sourceRoots: [modules/order, workflows/order]
+    output: domains/order-management
+    owners: [commerce-team]
+    capabilities: [order-management]
+    criticality: high
+
+  - id: submit-order
+    component: commerce-core
+    kind: flow
+    sourceRoots: [workflows/order/submit-order.bpmn]
+    relatedUnits: [order-management]
+    output: flows/submit-order
+```
+
+Supported kinds are `domain`, `subdomain`, `bounded-context`, `component`, `module`, `flow`, `platform`, and `catalog`. Source roots and output paths are normalized relative paths and cannot escape the component scope.
+
+### Adaptive planning
+
+The planner combines three inputs:
+
+1. capability packs required by the component profile;
+2. explicit component `packs`;
+3. capability evidence discovered from eligible source files.
+
+It records included, skipped, and deferred decisions rather than forcing every concern into a fixed page set. The Phase 1 plan describes the future hierarchical pages while the existing renderer remains backward-compatible.
 
 ## Documentation profiles
 
@@ -359,7 +412,7 @@ A neutral fallback that does not force service or application terminology.
 
 ## Specialized documentation pack
 
-Version 1.2.3 provides deterministic first-class documentation for runtime configuration, integrations, interfaces, messaging, jobs, business behaviour, traffic, request processing, security, concurrency, asynchronous work, context propagation, databases, cryptography, and files.
+The backward-compatible profile renderer provides deterministic first-class documentation for runtime configuration, integrations, interfaces, messaging, jobs, business behaviour, traffic, request processing, security, concurrency, asynchronous work, context propagation, databases, cryptography, and files.
 
 The following related subjects remain intentionally merged:
 
@@ -472,6 +525,10 @@ mermaid:
 ```text
 .wikiforge/
 ├── state.json
+├── components/
+│   └── <component-id>/
+│       ├── discovery.json
+│       └── plan.json
 ├── validation/
 │   ├── <component-id>.json
 │   └── system.json
@@ -500,7 +557,7 @@ services:
     enabled: true
 ```
 
-are normalized to `microservice` components using the `application` profile. New configurations should use `version: 2` and `components`.
+are normalized to `microservice` components using the `application` profile. Version 2 component configurations are also accepted and normalized in memory to version 3. New configurations should use `version: 3`, `components`, and optional `documentationUnits`. Use `wikiforge config migrate` to emit a normalized version 3 JSON file.
 
 ## Security
 

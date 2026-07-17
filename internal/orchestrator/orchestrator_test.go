@@ -165,11 +165,31 @@ func TestGenerateAllProfilesMonorepoAndSystemEndToEnd(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(root, ".wikiforge", "graph", "app", "nodes.jsonl"),
 		filepath.Join(root, ".wikiforge", "graph", "system", "edges.jsonl"),
+		filepath.Join(root, ".wikiforge", "components", "app", "discovery.json"),
+		filepath.Join(root, ".wikiforge", "components", "app", "plan.json"),
+		filepath.Join(root, ".wikiforge", "system", "plan.json"),
+		filepath.Join(cfg.System.Output, "sources", "system-plan.json"),
+		filepath.Join(cfg.System.Output, "sources", "components", "app", "discovery.json"),
+		filepath.Join(cfg.System.Output, "sources", "components", "app", "plan.json"),
 		filepath.Join(cfg.System.Output, "openwiki", "system", "infrastructure-deployment.md"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("missing %s: %v", path, err)
 		}
+	}
+	instructions, err := os.ReadFile(filepath.Join(components[0].DocumentationRoot(), "INSTRUCTIONS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(instructions), "Adaptive planning context") || !strings.Contains(string(instructions), "`api`") || !strings.Contains(string(instructions), ".wikiforge/components/app/plan.json") {
+		t.Fatalf("instructions missing adaptive context or artifact path:\n%s", instructions)
+	}
+	systemInstructions, err := os.ReadFile(filepath.Join(cfg.System.Output, "openwiki", "INSTRUCTIONS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(systemInstructions), "Adaptive system plan") || !strings.Contains(string(systemInstructions), "system/component-landscape.md") {
+		t.Fatalf("system instructions missing adaptive plan:\n%s", systemInstructions)
 	}
 
 	fr.mu.Lock()
@@ -317,5 +337,101 @@ func TestRemoveObsoleteDocumentation(t *testing.T) {
 	}
 	if !fileExists(keep) {
 		t.Fatal("unrelated canonical documentation was removed")
+	}
+}
+
+type alwaysFailRunner struct{}
+
+func (alwaysFailRunner) Check(context.Context) error { return nil }
+func (alwaysFailRunner) Run(context.Context, string, string, string) (string, error) {
+	return "", fmt.Errorf("intentional generation failure")
+}
+
+func TestFailedRunPreservesLastSuccessfulAdaptiveCheckpoint(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "fixture")
+	cfg := config.Defaults()
+	cfg.Workspace = root
+	cfg.Components = []config.ComponentConfig{{ID: "app", Type: "microservice", Profile: "application", Repository: repo, Enabled: true}}
+	cfg.System.Enabled = false
+	cfg.Mermaid.Mode = "basic"
+	cfg.Execution.MaxProcessRetries = 0
+	o := New(cfg, alwaysFailRunner{}, io.Discard)
+	previous := model.TargetState{
+		Status: "completed", SourceHash: "last-source", DocsHash: "last-docs",
+		DiscoveryHash: "last-discovery", PlanHash: "last-plan", Phases: map[string]model.PhaseStatus{},
+	}
+	state := model.RunState{Version: 3, RunID: "previous-success", Components: map[string]model.TargetState{"app": previous}}
+	if err := o.Store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Generate(context.Background(), GenerateOptions{ComponentID: "app", SkipSystem: true}); err == nil {
+		t.Fatal("expected generation failure")
+	}
+	stored, err := o.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := stored.Components["app"]
+	if got.SourceHash != previous.SourceHash || got.DocsHash != previous.DocsHash || got.DiscoveryHash != previous.DiscoveryHash || got.PlanHash != previous.PlanHash {
+		t.Fatalf("failed run replaced last-successful checkpoint: got=%+v want=%+v", got, previous)
+	}
+}
+
+func TestPlanSystemAggregationRespectsIncludeInSystem(t *testing.T) {
+	workspace := t.TempDir()
+	includedRoot := filepath.Join(workspace, "included")
+	excludedRoot := filepath.Join(workspace, "excluded")
+	for _, root := range []string{includedRoot, excludedRoot} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(includedRoot, "README.md"), []byte("domain orders"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(excludedRoot, "README.md"), []byte("domain billing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	included := true
+	excluded := false
+	cfg := config.Defaults()
+	cfg.Workspace = workspace
+	cfg.Components = []config.ComponentConfig{
+		{ID: "included", Type: "microservice", Profile: "application", Repository: includedRoot, Enabled: true, IncludeInSystem: &included, Capabilities: []string{"orders"}},
+		{ID: "excluded", Type: "microservice", Profile: "application", Repository: excludedRoot, Enabled: true, IncludeInSystem: &excluded, Capabilities: []string{"billing"}},
+	}
+	o := New(cfg, &fakeRunner{}, io.Discard)
+	if _, err := o.PlanWithExplain("", true, false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, ".wikiforge", "system", "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan model.DocumentationPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, unit := range plan.Units {
+		if unit.ComponentID == "excluded" {
+			t.Fatalf("excluded component leaked into system plan: %+v", plan.Units)
+		}
+	}
+	foundIncluded := false
+	for _, unit := range plan.Units {
+		foundIncluded = foundIncluded || unit.ComponentID == "included"
+	}
+	if !foundIncluded {
+		t.Fatalf("included component missing from system plan: %+v", plan.Units)
 	}
 }

@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/example/wikiforge/internal/config"
+	"github.com/example/wikiforge/internal/discovery"
 	"github.com/example/wikiforge/internal/graph"
 	"github.com/example/wikiforge/internal/model"
 	"github.com/example/wikiforge/internal/openwiki"
+	"github.com/example/wikiforge/internal/planner"
 	"github.com/example/wikiforge/internal/prompts"
 	"github.com/example/wikiforge/internal/report"
 	"github.com/example/wikiforge/internal/state"
@@ -60,23 +62,174 @@ func New(cfg config.Config, runner openwiki.Runner, out io.Writer) *Orchestrator
 }
 
 func (o *Orchestrator) Plan(componentID string, includeSystem bool) []string {
-	var lines []string
-	for _, component := range o.selectedComponents(componentID) {
-		profile, _ := prompts.GetProfile(component.Profile)
-		lines = append(lines, fmt.Sprintf("component %s type=%s profile=%s repository=%s scope=%s", component.ID, component.Type, component.Profile, component.Repository, printableScope(component.Scope)))
-		for _, p := range profile.Phases {
-			lines = append(lines, "  "+p.ID+"  "+p.Name)
-		}
-		lines = append(lines, "  validate -> targeted repair -> graph export")
-	}
-	if includeSystem && o.Config.System.Enabled {
-		lines = append(lines, fmt.Sprintf("system %s (%s)", o.Config.System.ID, o.Config.System.Output))
-		for _, p := range prompts.SystemPhases {
-			lines = append(lines, "  "+p.ID+"  "+p.Name)
-		}
-		lines = append(lines, "  validate -> targeted repair -> graph export")
+	lines, err := o.PlanWithExplain(componentID, includeSystem, true)
+	if err != nil {
+		return []string{"plan failed: " + err.Error()}
 	}
 	return lines
+}
+
+func (o *Orchestrator) PlanWithExplain(componentID string, includeSystem, explain bool) ([]string, error) {
+	components := o.selectedComponents(componentID)
+	if len(components) == 0 {
+		return nil, fmt.Errorf("no enabled component matched %q", componentID)
+	}
+	var lines []string
+	var systemComponentPlans []model.DocumentationPlan
+	for _, component := range components {
+		manifest, plan, err := o.prepareAdaptivePlan(component, true)
+		if err != nil {
+			return nil, fmt.Errorf("component %s discovery failed: %w", component.ID, err)
+		}
+		if component.IsIncludedInSystem() {
+			systemComponentPlans = append(systemComponentPlans, plan)
+		}
+		lines = append(lines, fmt.Sprintf("component %s type=%s profile=%s repository=%s scope=%s scanned=%d", component.ID, component.Type, component.Profile, component.Repository, printableScope(component.Scope), manifest.FilesScanned))
+		if explain {
+			for _, line := range planner.Explain(plan) {
+				lines = append(lines, "  "+line)
+			}
+		} else {
+			lines = append(lines, fmt.Sprintf("  adaptive plan packs=%d units=%d pages=%d; use --explain for decisions", len(plan.SelectedPacks), len(plan.Units), len(plan.Pages)))
+		}
+		profile, _ := prompts.GetProfile(component.Profile)
+		lines = append(lines, "  execution compatibility phases:")
+		for _, p := range profile.Phases {
+			lines = append(lines, "    "+p.ID+"  "+p.Name)
+		}
+		lines = append(lines, "    validate -> targeted repair -> graph export")
+	}
+	if includeSystem && o.Config.System.Enabled {
+		if len(systemComponentPlans) == 0 {
+			_ = os.Remove(filepath.Join(o.Config.Workspace, ".wikiforge", "system", "plan.json"))
+			lines = append(lines, fmt.Sprintf("system %s skipped: no selected component is included in system aggregation", o.Config.System.ID))
+		} else {
+			systemPlan := planner.BuildSystem(o.Config, systemComponentPlans)
+			if err := writeJSON(filepath.Join(o.Config.Workspace, ".wikiforge", "system", "plan.json"), systemPlan); err != nil {
+				return nil, fmt.Errorf("persist system %s plan: %w", o.Config.System.ID, err)
+			}
+			lines = append(lines, fmt.Sprintf("system %s (%s)", o.Config.System.ID, o.Config.System.Output))
+			if explain {
+				for _, line := range planner.Explain(systemPlan) {
+					lines = append(lines, "  "+line)
+				}
+			} else {
+				lines = append(lines, fmt.Sprintf("  adaptive system plan packs=%d units=%d pages=%d; use --explain for decisions", len(systemPlan.SelectedPacks), len(systemPlan.Units), len(systemPlan.Pages)))
+			}
+			lines = append(lines, "  execution compatibility phases:")
+			for _, p := range prompts.SystemPhases {
+				lines = append(lines, "    "+p.ID+"  "+p.Name)
+			}
+			lines = append(lines, "    validate -> targeted repair -> graph export")
+		}
+	}
+	return lines, nil
+}
+
+func (o *Orchestrator) Discover(componentID string, persist bool) ([]model.DiscoveryManifest, error) {
+	components := o.selectedComponents(componentID)
+	if len(components) == 0 {
+		return nil, fmt.Errorf("no enabled component matched %q", componentID)
+	}
+	out := make([]model.DiscoveryManifest, 0, len(components))
+	for _, component := range components {
+		manifest, _, err := o.prepareAdaptivePlan(component, persist)
+		if err != nil {
+			return nil, fmt.Errorf("component %s: %w", component.ID, err)
+		}
+		out = append(out, manifest)
+	}
+	return out, nil
+}
+
+func (o *Orchestrator) AdaptivePlans(componentID string, persist bool) ([]model.DocumentationPlan, error) {
+	components := o.selectedComponents(componentID)
+	if len(components) == 0 {
+		return nil, fmt.Errorf("no enabled component matched %q", componentID)
+	}
+	out := make([]model.DocumentationPlan, 0, len(components))
+	for _, component := range components {
+		_, plan, err := o.prepareAdaptivePlan(component, persist)
+		if err != nil {
+			return nil, fmt.Errorf("component %s: %w", component.ID, err)
+		}
+		out = append(out, plan)
+	}
+	return out, nil
+}
+
+func (o *Orchestrator) prepareAdaptivePlan(component config.ComponentConfig, persist bool) (model.DiscoveryManifest, model.DocumentationPlan, error) {
+	manifest, err := discovery.Discover(o.Config, component)
+	if err != nil {
+		return model.DiscoveryManifest{}, model.DocumentationPlan{}, err
+	}
+	plan := planner.Build(o.Config, component, manifest)
+	if persist {
+		root := filepath.Join(o.Config.Workspace, ".wikiforge", "components", component.ID)
+		if err := writeJSON(filepath.Join(root, "discovery.json"), manifest); err != nil {
+			return manifest, plan, err
+		}
+		if err := writeJSON(filepath.Join(root, "plan.json"), plan); err != nil {
+			return manifest, plan, err
+		}
+	}
+	return manifest, plan, nil
+}
+
+func (o *Orchestrator) prepareSystemAdaptivePlan(components []config.ComponentConfig, persist bool) (model.DocumentationPlan, error) {
+	componentPlans := make([]model.DocumentationPlan, 0, len(components))
+	for _, component := range components {
+		_, plan, err := o.prepareAdaptivePlan(component, persist)
+		if err != nil {
+			return model.DocumentationPlan{}, fmt.Errorf("component %s: %w", component.ID, err)
+		}
+		componentPlans = append(componentPlans, plan)
+	}
+	systemPlan := planner.BuildSystem(o.Config, componentPlans)
+	if persist {
+		if err := writeJSON(filepath.Join(o.Config.Workspace, ".wikiforge", "system", "plan.json"), systemPlan); err != nil {
+			return systemPlan, err
+		}
+	}
+	return systemPlan, nil
+}
+
+func writeJSON(path string, value any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err == nil {
+		return nil
+	}
+	// Windows does not replace an existing destination. Preserve atomic rename
+	// on hosts that support it, then use a remove-and-retry fallback.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func hashValue(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (GenerateResult, error) {
@@ -88,15 +241,19 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 		return GenerateResult{}, err
 	}
 	migrateState(&st)
-	if st.RunID == "" || (!options.Resume && !options.UpdateOnly) {
+	if st.RunID == "" {
 		st = model.RunState{
-			Version:    2,
-			RunID:      time.Now().UTC().Format("20060102T150405Z"),
-			Mode:       "generate",
-			StartedAt:  time.Now().UTC(),
+			Version:    3,
 			Components: map[string]model.TargetState{},
 			System:     model.TargetState{Phases: map[string]model.PhaseStatus{}},
 		}
+	}
+	if !options.Resume && !options.UpdateOnly {
+		// A full generation starts a new reportable run, but the target hashes
+		// remain the last-successful checkpoint until each target completes.
+		st.RunID = time.Now().UTC().Format("20060102T150405.000000000Z")
+		st.Mode = "generate"
+		st.StartedAt = time.Now().UTC()
 	} else if options.UpdateOnly {
 		// Start a new reportable run while preserving the last successful hashes
 		// and phase state required for scoped no-op detection.
@@ -206,7 +363,21 @@ func (o *Orchestrator) runComponent(ctx context.Context, st *model.RunState, com
 	if err != nil {
 		return model.ValidationResult{}, err
 	}
-	if err := o.writeComponentInstructions(component, profile); err != nil {
+	manifest, adaptivePlan, err := o.prepareAdaptivePlan(component, true)
+	if err != nil {
+		return model.ValidationResult{}, fmt.Errorf("prepare adaptive plan: %w", err)
+	}
+	adaptiveValues := prompts.AdaptiveValues(manifest, adaptivePlan)
+	artifactRoot := filepath.Join(o.Config.Workspace, ".wikiforge", "components", component.ID)
+	if rel, relErr := filepath.Rel(component.WorkDir(), filepath.Join(artifactRoot, "discovery.json")); relErr == nil {
+		adaptiveValues["DISCOVERY_ARTIFACT"] = filepath.ToSlash(rel)
+	}
+	if rel, relErr := filepath.Rel(component.WorkDir(), filepath.Join(artifactRoot, "plan.json")); relErr == nil {
+		adaptiveValues["PLAN_ARTIFACT"] = filepath.ToSlash(rel)
+	}
+	discoveryHash := hashValue(manifest)
+	planHash := hashValue(adaptivePlan)
+	if err := o.writeComponentInstructions(component, profile, manifest, adaptivePlan, adaptiveValues); err != nil {
 		return model.ValidationResult{}, err
 	}
 	removeObsoleteDocumentation(component.DocumentationRoot(), []string{
@@ -227,22 +398,27 @@ func (o *Orchestrator) runComponent(ctx context.Context, st *model.RunState, com
 	}
 	previousSourceHash := target.SourceHash
 	previousDocsHash := target.DocsHash
+	previousDiscoveryHash := target.DiscoveryHash
+	previousPlanHash := target.PlanHash
 	currentSourceHash := componentSourceHash(workdir)
 	currentDocsHash := directoryHash(component.DocumentationRoot())
 	target.Status = "running"
 	target.GitHead = gitHead(component.Repository)
-	target.SourceHash = currentSourceHash
+	// Source, discovery, and plan hashes remain the last-successful checkpoint
+	// until generation, validation, and finalization complete.
 	o.saveComponentTarget(st, component.ID, target)
 
-	if options.UpdateOnly && previousSourceHash != "" && previousSourceHash == currentSourceHash && previousDocsHash != "" && previousDocsHash == currentDocsHash {
+	if options.UpdateOnly && previousSourceHash != "" && previousSourceHash == currentSourceHash && previousDocsHash != "" && previousDocsHash == currentDocsHash && previousDiscoveryHash == discoveryHash && previousPlanHash == planHash {
 		progress.skip("UPD", "No scoped source or documentation changes; model call skipped")
 	} else if options.UpdateOnly {
-		prompt, err := prompts.RenderComponentUpdate(profile, component, o.Config.Documentation.Language)
+		prompt, err := prompts.RenderComponentUpdateWithValues(profile, component, o.Config.Documentation.Language, adaptiveValues)
 		if err != nil {
 			return model.ValidationResult{}, err
 		}
 		label := progress.start("UPD", "Incremental documentation update")
 		if err := o.runWithRetries(ctx, workdir, "update", prompt, label); err != nil {
+			target.Status = "failed"
+			o.saveComponentTarget(st, component.ID, target)
 			progress.fail("UPD", err.Error())
 			return model.ValidationResult{}, err
 		}
@@ -260,7 +436,7 @@ func (o *Orchestrator) runComponent(ctx context.Context, st *model.RunState, com
 			target.Phases[phase.ID] = ps
 			o.saveComponentTarget(st, component.ID, target)
 
-			prompt, err := prompts.RenderComponentPhase(phase, profile, component, o.Config.Documentation.Language, nil)
+			prompt, err := prompts.RenderComponentPhase(phase, profile, component, o.Config.Documentation.Language, adaptiveValues)
 			if err != nil {
 				progress.fail(phase.ID, err.Error())
 				return model.ValidationResult{}, err
@@ -273,6 +449,7 @@ func (o *Orchestrator) runComponent(ctx context.Context, st *model.RunState, com
 			if err := o.runWithRetries(ctx, workdir, op, prompt, label); err != nil {
 				ps.Status = "failed"
 				ps.Error = err.Error()
+				target.Status = "failed"
 				target.Phases[phase.ID] = ps
 				o.saveComponentTarget(st, component.ID, target)
 				progress.fail(phase.ID, err.Error())
@@ -327,6 +504,8 @@ func (o *Orchestrator) runComponent(ctx context.Context, st *model.RunState, com
 	target.GitHead = gitHead(component.Repository)
 	target.SourceHash = componentSourceHash(workdir)
 	target.DocsHash = directoryHash(component.DocumentationRoot())
+	target.DiscoveryHash = discoveryHash
+	target.PlanHash = planHash
 	if vr.Accepted {
 		target.Status = "completed"
 	} else {
@@ -342,10 +521,11 @@ func (o *Orchestrator) runComponent(ctx context.Context, st *model.RunState, com
 
 func (o *Orchestrator) runSystem(ctx context.Context, st *model.RunState, components []config.ComponentConfig, options GenerateOptions) (model.ValidationResult, error) {
 	root := o.Config.System.Output
-	if err := o.prepareSystemWorkspace(root, components); err != nil {
+	systemPlan, err := o.prepareSystemWorkspace(root, components)
+	if err != nil {
 		return model.ValidationResult{}, err
 	}
-	if err := o.writeSystemInstructions(root); err != nil {
+	if err := o.writeSystemInstructions(root, systemPlan); err != nil {
 		return model.ValidationResult{}, err
 	}
 	removeObsoleteDocumentation(filepath.Join(root, "openwiki"), []string{
@@ -369,21 +549,25 @@ func (o *Orchestrator) runSystem(ctx context.Context, st *model.RunState, compon
 	}
 	previousSourceHash := target.SourceHash
 	previousDocsHash := target.DocsHash
+	previousPlanHash := target.PlanHash
+	currentPlanHash := hashValue(systemPlan)
 	currentSourceHash := directoryHash(filepath.Join(root, "sources")) + directoryHash(filepath.Join(root, "facts"))
 	currentDocsHash := directoryHash(filepath.Join(root, "openwiki"))
 	target.Status = "running"
 	target.GitHead = gitHead(root)
 	o.saveSystemTarget(st, target)
 
-	if options.UpdateOnly && previousSourceHash != "" && previousSourceHash == currentSourceHash && previousDocsHash != "" && previousDocsHash == currentDocsHash {
+	if options.UpdateOnly && previousSourceHash != "" && previousSourceHash == currentSourceHash && previousDocsHash != "" && previousDocsHash == currentDocsHash && previousPlanHash == currentPlanHash {
 		progress.skip("UPD", "No source or documentation changes; model call skipped")
 	} else if options.UpdateOnly {
-		prompt, err := prompts.RenderSystemUpdate(o.Config.Documentation.Language, o.Config.System.ID)
+		prompt, err := prompts.RenderSystemUpdateWithPlan(o.Config.Documentation.Language, o.Config.System.ID, systemPlan)
 		if err != nil {
 			return model.ValidationResult{}, err
 		}
 		label := progress.start("UPD", "Incremental whole-system update")
 		if err := o.runWithRetries(ctx, root, "update", prompt, label); err != nil {
+			target.Status = "failed"
+			o.saveSystemTarget(st, target)
 			progress.fail("UPD", err.Error())
 			return model.ValidationResult{}, err
 		}
@@ -401,7 +585,7 @@ func (o *Orchestrator) runSystem(ctx context.Context, st *model.RunState, compon
 			target.Phases[phase.ID] = ps
 			o.saveSystemTarget(st, target)
 
-			prompt, err := prompts.RenderSystemPhase(phase, o.Config.Documentation.Language, o.Config.System.ID)
+			prompt, err := prompts.RenderSystemPhaseWithPlan(phase, o.Config.Documentation.Language, o.Config.System.ID, systemPlan)
 			if err != nil {
 				progress.fail(phase.ID, err.Error())
 				return model.ValidationResult{}, err
@@ -414,6 +598,7 @@ func (o *Orchestrator) runSystem(ctx context.Context, st *model.RunState, compon
 			if err := o.runWithRetries(ctx, root, op, prompt, label); err != nil {
 				ps.Status = "failed"
 				ps.Error = err.Error()
+				target.Status = "failed"
 				target.Phases[phase.ID] = ps
 				o.saveSystemTarget(st, target)
 				progress.fail(phase.ID, err.Error())
@@ -464,6 +649,7 @@ func (o *Orchestrator) runSystem(ctx context.Context, st *model.RunState, compon
 	target.GitHead = gitHead(root)
 	target.SourceHash = directoryHash(filepath.Join(root, "sources")) + directoryHash(filepath.Join(root, "facts"))
 	target.DocsHash = directoryHash(filepath.Join(root, "openwiki"))
+	target.PlanHash = currentPlanHash
 	if vr.Accepted {
 		target.Status = "completed"
 	} else {
@@ -508,16 +694,16 @@ func (o *Orchestrator) runWithRetries(ctx context.Context, workdir, operation, p
 	return last
 }
 
-func (o *Orchestrator) writeComponentInstructions(component config.ComponentConfig, profile prompts.Profile) error {
-	content, err := prompts.RenderInstructions(profile, component, o.Config.Documentation.Language)
+func (o *Orchestrator) writeComponentInstructions(component config.ComponentConfig, profile prompts.Profile, manifest model.DiscoveryManifest, plan model.DocumentationPlan, values map[string]string) error {
+	content, err := prompts.RenderInstructionsWithPlanValues(profile, component, o.Config.Documentation.Language, manifest, plan, values)
 	if err != nil {
 		return err
 	}
 	return writeMergedInstructions(filepath.Join(component.DocumentationRoot(), "INSTRUCTIONS.md"), content)
 }
 
-func (o *Orchestrator) writeSystemInstructions(root string) error {
-	content, err := prompts.RenderTemplate("templates/system-instructions.md", o.Config.Documentation.Language, o.Config.System.ID)
+func (o *Orchestrator) writeSystemInstructions(root string, plan model.DocumentationPlan) error {
+	content, err := prompts.RenderSystemInstructions(o.Config.Documentation.Language, o.Config.System.ID, plan)
 	if err != nil {
 		return err
 	}
@@ -556,14 +742,18 @@ func mergeMarker(existing, replacement, start, end string) string {
 	return strings.TrimRight(existing, " \t\r\n") + "\n\n" + replacement + "\n"
 }
 
-func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.ComponentConfig) error {
+func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.ComponentConfig) (model.DocumentationPlan, error) {
+	systemPlan, err := o.prepareSystemAdaptivePlan(components, true)
+	if err != nil {
+		return model.DocumentationPlan{}, err
+	}
 	sourcesRoot := filepath.Join(root, "sources")
 	componentsRoot := filepath.Join(sourcesRoot, "components")
 	if err := os.RemoveAll(componentsRoot); err != nil {
-		return err
+		return model.DocumentationPlan{}, err
 	}
 	if err := os.MkdirAll(componentsRoot, 0o755); err != nil {
-		return err
+		return model.DocumentationPlan{}, err
 	}
 
 	type manifestComponent struct {
@@ -577,6 +767,8 @@ func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.C
 		Scope            string   `json:"scope,omitempty"`
 		GitHead          string   `json:"gitHead,omitempty"`
 		Documentation    string   `json:"documentation"`
+		Discovery        string   `json:"discovery,omitempty"`
+		Plan             string   `json:"plan,omitempty"`
 	}
 	manifest := struct {
 		SchemaVersion int                 `json:"schemaVersion"`
@@ -590,9 +782,23 @@ func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.C
 		if !fileExists(src) {
 			continue
 		}
-		dst := filepath.Join(componentsRoot, component.ID, "openwiki")
+		componentRoot := filepath.Join(componentsRoot, component.ID)
+		dst := filepath.Join(componentRoot, "openwiki")
 		if err := copyDir(src, dst); err != nil {
-			return err
+			return model.DocumentationPlan{}, err
+		}
+		adaptiveRoot := filepath.Join(o.Config.Workspace, ".wikiforge", "components", component.ID)
+		for _, name := range []string{"discovery.json", "plan.json"} {
+			source := filepath.Join(adaptiveRoot, name)
+			if fileExists(source) {
+				data, err := os.ReadFile(source)
+				if err != nil {
+					return model.DocumentationPlan{}, err
+				}
+				if err := os.WriteFile(filepath.Join(componentRoot, name), data, 0o644); err != nil {
+					return model.DocumentationPlan{}, err
+				}
+			}
 		}
 		manifest.Components = append(manifest.Components, manifestComponent{
 			ID: component.ID, Type: component.Type, Profile: component.Profile,
@@ -600,27 +806,35 @@ func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.C
 			SourceRepository: component.Repository, Scope: component.Scope,
 			GitHead:       gitHead(component.Repository),
 			Documentation: "sources/components/" + component.ID + "/openwiki/quickstart.md",
+			Discovery:     "sources/components/" + component.ID + "/discovery.json",
+			Plan:          "sources/components/" + component.ID + "/plan.json",
 		})
 	}
 	sort.Slice(manifest.Components, func(i, j int) bool { return manifest.Components[i].ID < manifest.Components[j].ID })
 	b, _ := json.MarshalIndent(manifest, "", "  ")
 	if err := os.WriteFile(filepath.Join(sourcesRoot, "manifest.json"), b, 0o644); err != nil {
-		return err
+		return model.DocumentationPlan{}, err
+	}
+	if err := writeJSON(filepath.Join(sourcesRoot, "system-plan.json"), systemPlan); err != nil {
+		return model.DocumentationPlan{}, err
 	}
 
 	if o.Config.System.FactsPath != "" && fileExists(o.Config.System.FactsPath) {
 		dst := filepath.Join(root, "facts")
 		if filepath.Clean(o.Config.System.FactsPath) != filepath.Clean(dst) {
 			if err := os.RemoveAll(dst); err != nil {
-				return err
+				return model.DocumentationPlan{}, err
 			}
 			if err := copyDir(o.Config.System.FactsPath, dst); err != nil {
-				return err
+				return model.DocumentationPlan{}, err
 			}
 		}
 	}
-	readme := "# WikiForge System Aggregation Workspace\n\nThe `sources/components/` directory contains immutable snapshots of generated component wikis. Components can be applications, modules, libraries, frameworks, contracts, infrastructure, or configuration. OpenWiki must synthesize the whole-system wiki under `openwiki/` and must not modify source snapshots.\n"
-	return os.WriteFile(filepath.Join(root, "README.md"), []byte(readme), 0o644)
+	readme := "# WikiForge System Aggregation Workspace\n\nThe `sources/components/` directory contains immutable snapshots of generated component wikis plus their deterministic discovery manifests and adaptive plans. Components can be applications, modules, libraries, frameworks, contracts, infrastructure, or configuration. OpenWiki must synthesize the whole-system wiki under `openwiki/` and must not modify source snapshots.\n"
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(readme), 0o644); err != nil {
+		return model.DocumentationPlan{}, err
+	}
+	return systemPlan, nil
 }
 
 func (o *Orchestrator) getComponentTarget(st *model.RunState, id string) model.TargetState {
@@ -827,8 +1041,8 @@ func migrateState(st *model.RunState) {
 		}
 	}
 	st.Services = nil
-	if st.Version < 2 {
-		st.Version = 2
+	if st.Version < 3 {
+		st.Version = 3
 	}
 }
 

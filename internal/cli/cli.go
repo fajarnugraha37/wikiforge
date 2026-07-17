@@ -22,7 +22,7 @@ import (
 	"github.com/example/wikiforge/internal/validation"
 )
 
-const Version = "1.2.3"
+const Version = "1.3.0"
 
 type CLI struct {
 	Out io.Writer
@@ -49,6 +49,10 @@ func (c CLI) Run(ctx context.Context, args []string) int {
 		return 0
 	case "profiles", "types":
 		return c.profilesCommand()
+	case "config":
+		return c.configCommand(args[1:])
+	case "discover":
+		return c.discoverCommand(args[1:])
 	case "init":
 		return c.initCommand(args[1:])
 	case "doctor":
@@ -79,7 +83,9 @@ Usage:
   wikiforge init [--config wikiforge.yaml] [--force]
   wikiforge doctor [--config wikiforge.yaml]
   wikiforge profiles
-  wikiforge plan [--config wikiforge.yaml] [--component ID] [--skip-system]
+  wikiforge config migrate [--config wikiforge.yaml] [--output wikiforge.v3.json] [--force]
+  wikiforge discover [--config wikiforge.yaml] [--component ID]
+  wikiforge plan [--config wikiforge.yaml] [--component ID] [--skip-system] [--explain]
   wikiforge generate [--config wikiforge.yaml] [--component ID] [--skip-system] [--resume]
   wikiforge update [--config wikiforge.yaml] [--component ID] [--skip-system]
   wikiforge resume [--config wikiforge.yaml]
@@ -123,6 +129,99 @@ func (c CLI) profilesCommand() int {
 	for _, profileID := range prompts.ProfileIDs() {
 		profile, _ := prompts.GetProfile(profileID)
 		fmt.Fprintf(c.Out, "  %-20s pages=%-2d phases=%-2d %s\n", profile.ID, len(prompts.ExpectedFiles(profile)), len(profile.Phases), profile.Description)
+	}
+	fmt.Fprintln(c.Out, "\nComposable capability packs:")
+	for _, pack := range config.SupportedCapabilityPacks() {
+		fmt.Fprintln(c.Out, "  "+pack)
+	}
+	fmt.Fprintln(c.Out, "\nAdaptive documentation views:")
+	for _, view := range config.SupportedViews() {
+		fmt.Fprintln(c.Out, "  "+view)
+	}
+	return 0
+}
+
+func (c CLI) configCommand(args []string) int {
+	if len(args) == 0 || args[0] != "migrate" {
+		fmt.Fprintln(c.Err, "usage: wikiforge config migrate [--config PATH] [--output PATH] [--force]")
+		return 2
+	}
+	fs, cfgPath := commonFlags("config migrate")
+	output := fs.String("output", "wikiforge.v3.json", "normalized version 3 output")
+	force := fs.Bool("force", false, "overwrite output")
+	if err := fs.Parse(args[1:]); err != nil {
+		return c.flagError(err)
+	}
+	if _, err := os.Stat(*output); err == nil && !*force {
+		return c.printErr(fmt.Errorf("%s already exists; use --force to replace it", *output))
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return c.printErr(err)
+	}
+	data, err := cfg.NormalizedJSONRelativeTo(filepath.Dir(*output))
+	if err != nil {
+		return c.printErr(err)
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(*output), 0o755); err != nil {
+		return c.printErr(err)
+	}
+	tmp := *output + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return c.printErr(err)
+	}
+	if err := replaceFile(tmp, *output, *force); err != nil {
+		return c.printErr(err)
+	}
+	fmt.Fprintf(c.Out, "migrated source version %d to version %d: %s\n", cfg.SourceVersion, config.CurrentVersion, *output)
+	return 0
+}
+
+func replaceFile(tmp, destination string, replace bool) error {
+	if !replace {
+		if err := os.Rename(tmp, destination); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		return nil
+	}
+	if err := os.Rename(tmp, destination); err == nil {
+		return nil
+	}
+	if err := os.Remove(destination); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, destination); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func (c CLI) discoverCommand(args []string) int {
+	fs, cfgPath := commonFlags("discover")
+	component, legacy := componentFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return c.flagError(err)
+	}
+	selected, err := resolveComponentFlag(*component, *legacy)
+	if err != nil {
+		return c.printErr(err)
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return c.printErr(err)
+	}
+	o := orchestrator.New(cfg, openwiki.ExecRunner{Config: cfg.OpenWiki, Out: c.Out}, c.Out)
+	manifests, err := o.Discover(selected, true)
+	if err != nil {
+		return c.printErr(err)
+	}
+	for _, manifest := range manifests {
+		data, _ := json.MarshalIndent(manifest, "", "  ")
+		fmt.Fprintf(c.Out, "[%s]\n%s\n", manifest.Component.ID, data)
 	}
 	return 0
 }
@@ -187,28 +286,7 @@ func (c CLI) doctorCommand(ctx context.Context, args []string) int {
 		}
 	}
 	for _, component := range cfg.EnabledComponents() {
-		statErr := func() error {
-			if _, e := os.Stat(component.Repository); e != nil {
-				return fmt.Errorf("repository: %w", e)
-			}
-			if !isGitRepo(component.Repository) {
-				return errors.New("repository is not a Git work tree")
-			}
-			if _, e := os.Stat(component.WorkDir()); e != nil {
-				return fmt.Errorf("scope %q: %w", component.Scope, e)
-			}
-			if e := checkExternalPath(component.Repository); e != nil {
-				return fmt.Errorf("repository path portability: %w", e)
-			}
-			if e := checkExternalPath(component.WorkDir()); e != nil {
-				return fmt.Errorf("scope path portability: %w", e)
-			}
-			if e := openwiki.CheckPromptTransport(component.WorkDir()); e != nil {
-				return fmt.Errorf("prompt-file transport: %w", e)
-			}
-			return nil
-		}()
-		check(fmt.Sprintf("component %s (%s/%s)", component.ID, component.Type, component.Profile), statErr)
+		check(fmt.Sprintf("component %s (%s/%s)", component.ID, component.Type, component.Profile), checkComponentEnvironment(component, cfg.UnitsForComponent(component.ID)))
 	}
 	if cfg.System.Enabled && cfg.System.FactsPath != "" {
 		if _, err := os.Stat(cfg.System.FactsPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -221,10 +299,40 @@ func (c CLI) doctorCommand(ctx context.Context, args []string) int {
 	return 0
 }
 
+func checkComponentEnvironment(component config.ComponentConfig, units []config.DocumentationUnitConfig) error {
+	if _, err := os.Stat(component.Repository); err != nil {
+		return fmt.Errorf("repository: %w", err)
+	}
+	if !isGitRepo(component.Repository) {
+		return errors.New("repository is not a Git work tree")
+	}
+	if _, err := os.Stat(component.WorkDir()); err != nil {
+		return fmt.Errorf("scope %q: %w", component.Scope, err)
+	}
+	if err := checkExternalPath(component.Repository); err != nil {
+		return fmt.Errorf("repository path portability: %w", err)
+	}
+	if err := checkExternalPath(component.WorkDir()); err != nil {
+		return fmt.Errorf("scope path portability: %w", err)
+	}
+	for _, unit := range units {
+		for _, root := range unit.SourceRoots {
+			if _, err := os.Stat(filepath.Join(component.WorkDir(), filepath.FromSlash(root))); err != nil {
+				return fmt.Errorf("documentation unit %s source root %q: %w", unit.ID, root, err)
+			}
+		}
+	}
+	if err := openwiki.CheckPromptTransport(component.WorkDir()); err != nil {
+		return fmt.Errorf("prompt-file transport: %w", err)
+	}
+	return nil
+}
+
 func (c CLI) planCommand(args []string) int {
 	fs, cfgPath := commonFlags("plan")
 	component, legacy := componentFlag(fs)
 	skip := fs.Bool("skip-system", false, "skip whole-system plan")
+	explain := fs.Bool("explain", false, "include skipped and deferred planning decisions")
 	if err := fs.Parse(args); err != nil {
 		return c.flagError(err)
 	}
@@ -237,7 +345,11 @@ func (c CLI) planCommand(args []string) int {
 		return c.printErr(err)
 	}
 	o := orchestrator.New(cfg, openwiki.ExecRunner{Config: cfg.OpenWiki, Out: c.Out, LiveOutput: true}, c.Out)
-	for _, line := range o.Plan(selected, !*skip) {
+	lines, err := o.PlanWithExplain(selected, !*skip, *explain)
+	if err != nil {
+		return c.printErr(err)
+	}
+	for _, line := range lines {
 		fmt.Fprintln(c.Out, line)
 	}
 	return 0

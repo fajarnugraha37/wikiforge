@@ -22,17 +22,17 @@ cmd/wikiforge/main.go
 
 ## CLI routing
 
-[`internal/cli/cli.go`](/internal/cli/cli.go) routes all commands from the `CLI.Run` method. Each command (init, doctor, profiles, plan, generate, update, resume, validate, graph) has its own handler. The `--component` flag (backward-compatible `--service` alias) selects individual components.
+[`internal/cli/cli.go`](/internal/cli/cli.go) routes all commands from the `CLI.Run` method. Each command (init, doctor, profiles, config migrate, discover, plan, generate, update, resume, validate, graph) has its own handler. The `--component` flag (backward-compatible `--service` alias) selects individual components.
 
 Key default values are defined here:
-- **Version**: `1.2.3` (constant)
+- **Version**: `1.3.0` (constant)
 - **Config file**: `wikiforge.yaml` (overridable with `--config`)
 
 ## Configuration subsystem
 
 [`internal/config/config.go`](/internal/config/config.go) provides the full configuration model:
 
-- **Version 2** config with backward-compatible v1 `services` → `components` migration.
+- **Version 3** config with backward-compatible v1 `services` and v2 component normalization, explicit documentation units, composable capability packs, views, evidence boundaries, and shard policy.
 - Custom YAML subset parser at [`internal/config/yaml.go`](/internal/config/yaml.go) — minimal indentation-based parser that avoids full YAML library dependencies for generated configs.
 - JSON Schema at [`/schema/wikiforge-config.schema.json`](/schema/wikiforge-config.schema.json) for editor validation.
 - Defaults applied automatically (parallelism, timeouts, Mermaid mode, etc.).
@@ -53,9 +53,16 @@ Every enabled `ComponentConfig` has:
 | `group` | Optional logical grouping |
 | `tags` | Classification tags |
 | `dependsOn` | Declared component dependencies |
+| `owners` | Ownership hints |
+| `capabilities` | Business capabilities converted to configured domain units |
+| `packs` | Explicit capability packs composed with profile defaults and discovery |
 | `includeInSystem` | Whether to include in whole-system aggregation |
 
 Multiple components may share one `repository` with different `scope` values. They are automatically serialized during generation to avoid competing OpenWiki writes.
+
+## Discovery and adaptive planning
+
+Before generation, WikiForge scans the normalized component scope using configured evidence include/exclude rules. It writes deterministic `discovery.json` and `plan.json` artifacts under `.wikiforge/components/<id>/`. The planner separates component boundaries from documentation units, combines profile, explicit, and discovered capability packs, and records include/skip/defer decisions. See [Adaptive planning](adaptive-planning.md).
 
 ## Profile and phase system
 
@@ -95,7 +102,7 @@ Components sharing a Git repository are deliberately placed in the same group an
 [`internal/state/store.go`](/internal/state/store.go) persists run state to `.wikiforge/state.json` in JSON format with atomic file writes (write-to-tmp, rename). The state includes:
 
 - **Run ID**, mode (generate/update), start time
-- **Per-component state** — Git HEAD, documentation hash, source hash, phase statuses
+- **Per-component state** — Git HEAD, last-successful documentation/source/discovery/plan hashes, status, and phase statuses
 - **System state** — Phase statuses for whole-system phases
 
 The state enables:
