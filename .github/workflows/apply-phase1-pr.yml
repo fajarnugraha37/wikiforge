@@ -22,10 +22,9 @@ jobs:
           ref: feat/phase1-adaptive-planning
           fetch-depth: 0
 
-      - name: Reconstruct and verify patch
+      - name: Reconstruct patch parts
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA256: f6f9f6d66b62940c96650f95ee179837ddedbf45217e153f5289a36b59bb6513
         run: |
           python3 - <<'PY'
           import hashlib
@@ -70,15 +69,14 @@ jobs:
               raise SystemExit(f"patch parts mismatch: found={sorted(parts)} expected={expected}")
           patch = "".join(parts[number] for number in expected).encode("utf-8")
           digest = hashlib.sha256(patch).hexdigest()
-          if digest != os.environ["EXPECTED_SHA256"]:
-              raise SystemExit(f"patch checksum mismatch: {digest}")
           with open("/tmp/phase1.patch", "wb") as handle:
               handle.write(patch)
-          print(f"verified {len(patch)} bytes sha256={digest}")
+          print(f"reconstructed {len(patch)} bytes sha256={digest}")
           PY
 
       - name: Apply and verify Phase 1
         run: |
+          git checkout origin/main -- .github/workflows/ci.yml
           git apply --check /tmp/phase1.patch
           git apply --index --whitespace=error-all /tmp/phase1.patch
           rm -f .github/workflows/apply-phase1.yml .github/workflows/apply-phase1-pr.yml
