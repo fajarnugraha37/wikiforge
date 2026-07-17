@@ -165,8 +165,10 @@ jobs:
           go test -race -count=1 ./...
           go build ./cmd/wikiforge
 
-      - name: Commit final Phase 1 tree
+      - name: Commit final Phase 1 code
         run: |
+          git restore --source=HEAD --staged --worktree .github/workflows
+          git add -A
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git commit -m "feat: add adaptive planning foundation"
