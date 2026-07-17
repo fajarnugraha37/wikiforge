@@ -39,7 +39,7 @@ func TestExecRunnerBuildsInitUpdateAndPromptCommands(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := string(b)
-			for _, required := range []string{"code", "--print", "BEGIN_WIKIFORGE_PROMPT_PATH", "--modelId", "cheap-model"} {
+			for _, required := range []string{"code", "--print", promptBridgePrefix, "--modelId", "cheap-model"} {
 				if !strings.Contains(args, required) {
 					t.Fatalf("operation %s missing %q in %q", operation, required, args)
 				}
@@ -102,15 +102,22 @@ func TestExecRunnerExternalizesVeryLargePrompt(t *testing.T) {
 	}
 }
 
-func TestExternalizedPromptUsesAbsoluteUnquotedPortablePath(t *testing.T) {
+func TestExternalizedPromptUsesSingleLineAbsolutePortablePath(t *testing.T) {
 	workdir := filepath.Join(t.TempDir(), "Project With Spaces", "資料")
 	cliPrompt, toolPath, cleanup, err := externalizePrompt(workdir, "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	if !strings.Contains(cliPrompt, "BEGIN_WIKIFORGE_PROMPT_PATH\n"+toolPath+"\nEND_WIKIFORGE_PROMPT_PATH") {
-		t.Fatalf("path markers are not exact:\n%s", cliPrompt)
+	if strings.ContainsAny(cliPrompt, "\r\n") {
+		t.Fatalf("prompt bridge must be single-line: %q", cliPrompt)
+	}
+	extracted, err := promptPathFromBridge(cliPrompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extracted != toolPath {
+		t.Fatalf("path mismatch: got %q want %q", extracted, toolPath)
 	}
 	if strings.ContainsAny(toolPath, "\\\"\r\n") {
 		t.Fatalf("tool path is not portable: %q", toolPath)
@@ -124,6 +131,26 @@ func TestExternalizedPromptUsesAbsoluteUnquotedPortablePath(t *testing.T) {
 	}
 	if string(b) != "hello" {
 		t.Fatalf("prompt mismatch: %q", string(b))
+	}
+}
+
+func TestExecRunnerRejectsClarificationResponse(t *testing.T) {
+	runner := ExecRunner{Config: config.OpenWikiConfig{
+		Command:        os.Args[0],
+		Args:           []string{"-test.run=TestOpenWikiHelperProcess", "--", "code"},
+		TimeoutMinutes: 1,
+		Environment: map[string]string{
+			"WIKIFORGE_HELPER_PROCESS":       "1",
+			"WIKIFORGE_CLARIFICATION_TEST":   "1",
+			"WIKIFORGE_CAPTURE_PROMPT_PATH": filepath.Join(t.TempDir(), "prompt.txt"),
+		},
+	}}
+	output, err := runner.Run(context.Background(), t.TempDir(), "prompt", "phase prompt")
+	if err == nil {
+		t.Fatalf("clarification response must fail; output=%q", output)
+	}
+	if !strings.Contains(err.Error(), "clarification") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -187,22 +214,20 @@ func TestOpenWikiHelperProcess(t *testing.T) {
 		time.Sleep(60 * time.Millisecond)
 		os.Exit(0)
 	}
+	if os.Getenv("WIKIFORGE_CLARIFICATION_TEST") == "1" {
+		fmt.Println("I do not see a file path. Could you clarify what you would like me to do?")
+		os.Exit(0)
+	}
 	path := os.Getenv("WIKIFORGE_CAPTURE_PATH")
-	_ = os.WriteFile(path, []byte(strings.Join(os.Args, "\n")), 0o644)
+	if path != "" {
+		_ = os.WriteFile(path, []byte(strings.Join(os.Args, "\n")), 0o644)
+	}
 	if promptCapture := os.Getenv("WIKIFORGE_CAPTURE_PROMPT_PATH"); promptCapture != "" {
 		for _, arg := range os.Args {
-			const begin = "BEGIN_WIKIFORGE_PROMPT_PATH\n"
-			const endMarker = "\nEND_WIKIFORGE_PROMPT_PATH"
-			start := strings.Index(arg, begin)
-			if start < 0 {
+			toolPath, err := promptPathFromBridge(arg)
+			if err != nil {
 				continue
 			}
-			start += len(begin)
-			end := strings.Index(arg[start:], endMarker)
-			if end < 0 {
-				continue
-			}
-			toolPath := arg[start : start+end]
 			if strings.ContainsAny(toolPath, "\"\r\n") {
 				os.Exit(23)
 			}
@@ -214,6 +239,21 @@ func TestOpenWikiHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func TestLooksLikeClarificationResponse(t *testing.T) {
+	for _, output := range []string{
+		`I see you mentioned a WikiForge task specification. Could you clarify what you'd like me to do?`,
+		`Do you have a file path for that WikiForge task specification?`,
+		`Please provide the absolute path and let me know what you need.`,
+	} {
+		if !looksLikeClarificationResponse(output) {
+			t.Fatalf("expected clarification response: %q", output)
+		}
+	}
+	if looksLikeClarificationResponse("All four specialized catalog pages are now complete.") {
+		t.Fatal("successful completion must not be classified as clarification")
+	}
 }
 
 func TestIsNonRetryableError(t *testing.T) {
@@ -228,5 +268,8 @@ func TestIsNonRetryableError(t *testing.T) {
 	}
 	if IsNonRetryableError(fmt.Errorf("provider returned HTTP 503")) {
 		t.Fatal("transient provider failure should remain retryable")
+	}
+	if IsNonRetryableError(fmt.Errorf("OpenWiki returned a clarification instead of executing the WikiForge task")) {
+		t.Fatal("clarification responses should be retryable")
 	}
 }
