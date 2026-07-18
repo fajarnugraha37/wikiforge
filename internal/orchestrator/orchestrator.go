@@ -11,18 +11,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/example/wikiforge/internal/config"
-	"github.com/example/wikiforge/internal/graph"
-	"github.com/example/wikiforge/internal/model"
-	"github.com/example/wikiforge/internal/openwiki"
-	"github.com/example/wikiforge/internal/prompts"
-	"github.com/example/wikiforge/internal/report"
-	"github.com/example/wikiforge/internal/state"
-	"github.com/example/wikiforge/internal/validation"
+	"github.com/fajarnugraha37/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/evidence"
+	"github.com/fajarnugraha37/wikiforge/internal/model"
+	"github.com/fajarnugraha37/wikiforge/internal/openwiki"
+	"github.com/fajarnugraha37/wikiforge/internal/report"
+	"github.com/fajarnugraha37/wikiforge/internal/state"
+	"github.com/fajarnugraha37/wikiforge/internal/validation"
 )
 
 type Orchestrator struct {
@@ -32,6 +32,8 @@ type Orchestrator struct {
 	Store     *state.Store
 	Out       io.Writer
 	stateMu   sync.Mutex
+	metricsMu sync.Mutex
+	metrics   *model.RunMetrics
 }
 
 type GenerateOptions struct {
@@ -59,27 +61,19 @@ func New(cfg config.Config, runner openwiki.Runner, out io.Writer) *Orchestrator
 	}
 }
 
-func (o *Orchestrator) Plan(componentID string, includeSystem bool) []string {
-	var lines []string
-	for _, component := range o.selectedComponents(componentID) {
-		profile, _ := prompts.GetProfile(component.Profile)
-		lines = append(lines, fmt.Sprintf("component %s type=%s profile=%s repository=%s scope=%s", component.ID, component.Type, component.Profile, component.Repository, printableScope(component.Scope)))
-		for _, p := range profile.Phases {
-			lines = append(lines, "  "+p.ID+"  "+p.Name)
-		}
-		lines = append(lines, "  validate -> targeted repair -> graph export")
-	}
-	if includeSystem && o.Config.System.Enabled {
-		lines = append(lines, fmt.Sprintf("system %s (%s)", o.Config.System.ID, o.Config.System.Output))
-		for _, p := range prompts.SystemPhases {
-			lines = append(lines, "  "+p.ID+"  "+p.Name)
-		}
-		lines = append(lines, "  validate -> targeted repair -> graph export")
-	}
-	return lines
-}
-
 func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (GenerateResult, error) {
+	started := time.Now().UTC()
+	metrics := &model.RunMetrics{StartedAt: started}
+	o.metricsMu.Lock()
+	o.metrics = metrics
+	o.metricsMu.Unlock()
+	defer func() {
+		metrics.CompletedAt = time.Now().UTC()
+		metrics.DurationMillis = metrics.CompletedAt.Sub(metrics.StartedAt).Milliseconds()
+		o.metricsMu.Lock()
+		o.metrics = nil
+		o.metricsMu.Unlock()
+	}()
 	if err := os.MkdirAll(filepath.Join(o.Config.Workspace, ".wikiforge"), 0o755); err != nil {
 		return GenerateResult{}, err
 	}
@@ -87,10 +81,9 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 	if err != nil {
 		return GenerateResult{}, err
 	}
-	migrateState(&st)
 	if st.RunID == "" || (!options.Resume && !options.UpdateOnly) {
 		st = model.RunState{
-			Version:    2,
+			Version:    3,
 			RunID:      time.Now().UTC().Format("20060102T150405Z"),
 			Mode:       "generate",
 			StartedAt:  time.Now().UTC(),
@@ -119,7 +112,7 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 
 	rep := report.RunReport{RunID: st.RunID, GeneratedAt: time.Now().UTC(), Components: map[string]model.ValidationResult{}, Failures: map[string]string{}}
 	var resultMu sync.Mutex
-	groups := repositoryGroups(components)
+	groups := repositoryGroups(components, o.Config.Execution.IsolateSameRepository)
 	workers := o.Config.Execution.ParallelComponents
 	if workers < 1 {
 		workers = 1
@@ -138,7 +131,17 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 				// avoid concurrent OpenWiki writes to repository-level agent files.
 				for _, component := range group {
 					fmt.Fprintf(o.Out, "[%s] starting type=%s profile=%s scope=%s\n", component.ID, component.Type, component.Profile, printableScope(component.Scope))
-					vr, runErr := o.runComponent(ctx, &st, component, options)
+					var vr model.ValidationResult
+					var runErr error
+					effective, cleanup, isolationErr := o.isolatedComponent(component)
+					if isolationErr != nil {
+						runErr = isolationErr
+					} else {
+						vr, runErr = o.runAdaptiveComponent(ctx, &st, effective, options)
+						if cleanupErr := cleanup(); runErr == nil && cleanupErr != nil {
+							runErr = cleanupErr
+						}
+					}
 					resultMu.Lock()
 					if runErr != nil {
 						rep.Failures[component.ID] = runErr.Error()
@@ -165,6 +168,7 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 	wg.Wait()
 
 	if len(rep.Failures) > 0 && !o.Config.Execution.ContinueOnComponentFailure {
+		rep.Metrics = *metrics
 		dir, _ := report.Write(o.Config.Workspace, rep)
 		return GenerateResult{ReportDir: dir, Report: rep}, fmt.Errorf("one or more components failed")
 	}
@@ -176,7 +180,9 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 		}
 	}
 	if !options.SkipSystem && o.Config.System.Enabled && len(completed) > 0 {
-		vr, sysErr := o.runSystem(ctx, &st, completed, options)
+		var vr model.ValidationResult
+		var sysErr error
+		vr, sysErr = o.runAdaptiveSystem(ctx, &st, completed, options)
 		if sysErr != nil {
 			rep.Failures["system"] = sysErr.Error()
 		} else {
@@ -184,6 +190,9 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 		}
 	}
 
+	metrics.CompletedAt = time.Now().UTC()
+	metrics.DurationMillis = metrics.CompletedAt.Sub(metrics.StartedAt).Milliseconds()
+	rep.Metrics = *metrics
 	dir, err := report.Write(o.Config.Workspace, rep)
 	if err != nil {
 		return GenerateResult{}, err
@@ -194,298 +203,21 @@ func (o *Orchestrator) Generate(ctx context.Context, options GenerateOptions) (G
 	return GenerateResult{ReportDir: dir, Report: rep}, nil
 }
 
-func (o *Orchestrator) runComponent(ctx context.Context, st *model.RunState, component config.ComponentConfig, options GenerateOptions) (model.ValidationResult, error) {
-	workdir := component.WorkDir()
-	if _, err := os.Stat(workdir); err != nil {
-		return model.ValidationResult{}, fmt.Errorf("component %s work directory: %w", component.ID, err)
-	}
-	if !isGitRepo(component.Repository) {
-		return model.ValidationResult{}, fmt.Errorf("component %s repository %s is not a Git repository", component.ID, component.Repository)
-	}
-	profile, err := prompts.GetProfile(component.Profile)
-	if err != nil {
-		return model.ValidationResult{}, err
-	}
-	if err := o.writeComponentInstructions(component, profile); err != nil {
-		return model.ValidationResult{}, err
-	}
-	removeObsoleteDocumentation(component.DocumentationRoot(), []string{
-		"runtime/traffic-and-request-flows.md",
-		"security/authentication-and-authorization.md",
-		"runtime/concurrency-and-asynchronous-processing.md",
-	})
-
-	generationSteps := len(profile.Phases)
-	if options.UpdateOnly {
-		generationSteps = 1
-	}
-	progress := newProgressTracker(o.Out, component.ID, generationSteps+2) // generation + validation + report/graph
-
-	target := o.getComponentTarget(st, component.ID)
-	if target.Phases == nil {
-		target.Phases = map[string]model.PhaseStatus{}
-	}
-	previousSourceHash := target.SourceHash
-	previousDocsHash := target.DocsHash
-	currentSourceHash := componentSourceHash(workdir)
-	currentDocsHash := directoryHash(component.DocumentationRoot())
-	target.Status = "running"
-	target.GitHead = gitHead(component.Repository)
-	target.SourceHash = currentSourceHash
-	o.saveComponentTarget(st, component.ID, target)
-
-	if options.UpdateOnly && previousSourceHash != "" && previousSourceHash == currentSourceHash && previousDocsHash != "" && previousDocsHash == currentDocsHash {
-		progress.skip("UPD", "No scoped source or documentation changes; model call skipped")
-	} else if options.UpdateOnly {
-		prompt, err := prompts.RenderComponentUpdate(profile, component, o.Config.Documentation.Language)
-		if err != nil {
-			return model.ValidationResult{}, err
-		}
-		label := progress.start("UPD", "Incremental documentation update")
-		if err := o.runWithRetries(ctx, workdir, "update", prompt, label); err != nil {
-			progress.fail("UPD", err.Error())
-			return model.ValidationResult{}, err
-		}
-		progress.complete("UPD", "Incremental documentation update")
-	} else {
-		for _, phase := range profile.Phases {
-			ps := target.Phases[phase.ID]
-			if options.Resume && ps.Status == "completed" {
-				progress.skip(phase.ID, phase.Name+" (already completed)")
-				continue
-			}
-			ps.Status = "running"
-			ps.Attempts++
-			ps.StartedAt = time.Now().UTC()
-			target.Phases[phase.ID] = ps
-			o.saveComponentTarget(st, component.ID, target)
-
-			prompt, err := prompts.RenderComponentPhase(phase, profile, component, o.Config.Documentation.Language, nil)
-			if err != nil {
-				progress.fail(phase.ID, err.Error())
-				return model.ValidationResult{}, err
-			}
-			op := "prompt"
-			if phase.Initialize && !fileExists(filepath.Join(component.DocumentationRoot(), "quickstart.md")) {
-				op = "init"
-			}
-			label := progress.start(phase.ID, phase.Name)
-			if err := o.runWithRetries(ctx, workdir, op, prompt, label); err != nil {
-				ps.Status = "failed"
-				ps.Error = err.Error()
-				target.Phases[phase.ID] = ps
-				o.saveComponentTarget(st, component.ID, target)
-				progress.fail(phase.ID, err.Error())
-				return model.ValidationResult{}, err
-			}
-			ps.Status = "completed"
-			ps.Error = ""
-			ps.CompletedAt = time.Now().UTC()
-			target.Phases[phase.ID] = ps
-			o.saveComponentTarget(st, component.ID, target)
-			progress.complete(phase.ID, phase.Name)
-		}
-	}
-
-	progress.start("VAL", "Validate generated Markdown, catalogs, links, evidence, and Mermaid")
-	vr := o.Validator.ValidateComponent(ctx, component)
-	for round := 1; !vr.Accepted && round <= o.Config.Execution.MaxRepairRounds; round++ {
-		progress.note("VAL", fmt.Sprintf("Repair round %d/%d for %d findings", round, o.Config.Execution.MaxRepairRounds, len(vr.Findings)))
-		repairPrompt, err := prompts.Render("prompts/common/repair.md", o.Config.Documentation.Language, component.ID, map[string]string{
-			"FINDINGS":       validation.FindingsText(vr.Findings),
-			"PROFILE_NAME":   profile.DisplayName,
-			"COMPONENT_TYPE": component.Type,
-			"SCOPE":          printableScope(component.Scope),
-		})
-		if err != nil {
-			progress.fail("VAL", err.Error())
-			return vr, err
-		}
-		label := fmt.Sprintf("%s/repair-%d", component.ID, round)
-		if err := o.runWithRetries(ctx, workdir, "prompt", repairPrompt, label); err != nil {
-			progress.fail("VAL", err.Error())
-			return vr, err
-		}
-		vr = o.Validator.ValidateComponent(ctx, component)
-	}
-	if vr.Accepted {
-		progress.complete("VAL", fmt.Sprintf("Validation accepted with score=%d", vr.Score))
-	} else {
-		progress.fail("VAL", fmt.Sprintf("Validation rejected with score=%d findings=%d", vr.Score, len(vr.Findings)))
-	}
-
-	progress.start("FIN", "Write validation report, export graph, and checkpoint state")
-	reportPath := filepath.Join(o.Config.Workspace, ".wikiforge", "validation", component.ID+".json")
-	_ = validation.WriteResult(reportPath, vr)
-	graphRoot := filepath.Join(o.Config.Workspace, ".wikiforge", "graph", component.ID)
-	if err := graph.Export(component.ID, component.DocumentationRoot(), graphRoot); err != nil {
-		progress.fail("FIN", err.Error())
-		return vr, err
-	}
-
-	target = o.getComponentTarget(st, component.ID)
-	target.GitHead = gitHead(component.Repository)
-	target.SourceHash = componentSourceHash(workdir)
-	target.DocsHash = directoryHash(component.DocumentationRoot())
-	if vr.Accepted {
-		target.Status = "completed"
-	} else {
-		target.Status = "completed-with-findings"
-	}
-	o.saveComponentTarget(st, component.ID, target)
-	progress.complete("FIN", "Reports, graph, and state written")
-	if !vr.Accepted {
-		return vr, fmt.Errorf("documentation validation failed with score %d", vr.Score)
-	}
-	return vr, nil
-}
-
-func (o *Orchestrator) runSystem(ctx context.Context, st *model.RunState, components []config.ComponentConfig, options GenerateOptions) (model.ValidationResult, error) {
-	root := o.Config.System.Output
-	if err := o.prepareSystemWorkspace(root, components); err != nil {
-		return model.ValidationResult{}, err
-	}
-	if err := o.writeSystemInstructions(root); err != nil {
-		return model.ValidationResult{}, err
-	}
-	removeObsoleteDocumentation(filepath.Join(root, "openwiki"), []string{
-		"system/traffic-and-request-flows.md",
-		"system/authentication-and-authorization.md",
-		"system/concurrency-async-and-context.md",
-	})
-	if err := ensureGitRepo(root); err != nil {
-		return model.ValidationResult{}, err
-	}
-
-	generationSteps := len(prompts.SystemPhases)
-	if options.UpdateOnly {
-		generationSteps = 1
-	}
-	progress := newProgressTracker(o.Out, "system", generationSteps+2)
-
-	target := o.getSystemTarget(st)
-	if target.Phases == nil {
-		target.Phases = map[string]model.PhaseStatus{}
-	}
-	previousSourceHash := target.SourceHash
-	previousDocsHash := target.DocsHash
-	currentSourceHash := directoryHash(filepath.Join(root, "sources")) + directoryHash(filepath.Join(root, "facts"))
-	currentDocsHash := directoryHash(filepath.Join(root, "openwiki"))
-	target.Status = "running"
-	target.GitHead = gitHead(root)
-	o.saveSystemTarget(st, target)
-
-	if options.UpdateOnly && previousSourceHash != "" && previousSourceHash == currentSourceHash && previousDocsHash != "" && previousDocsHash == currentDocsHash {
-		progress.skip("UPD", "No source or documentation changes; model call skipped")
-	} else if options.UpdateOnly {
-		prompt, err := prompts.RenderSystemUpdate(o.Config.Documentation.Language, o.Config.System.ID)
-		if err != nil {
-			return model.ValidationResult{}, err
-		}
-		label := progress.start("UPD", "Incremental whole-system update")
-		if err := o.runWithRetries(ctx, root, "update", prompt, label); err != nil {
-			progress.fail("UPD", err.Error())
-			return model.ValidationResult{}, err
-		}
-		progress.complete("UPD", "Incremental whole-system update")
-	} else {
-		for _, phase := range prompts.SystemPhases {
-			ps := target.Phases[phase.ID]
-			if options.Resume && ps.Status == "completed" {
-				progress.skip(phase.ID, phase.Name+" (already completed)")
-				continue
-			}
-			ps.Status = "running"
-			ps.Attempts++
-			ps.StartedAt = time.Now().UTC()
-			target.Phases[phase.ID] = ps
-			o.saveSystemTarget(st, target)
-
-			prompt, err := prompts.RenderSystemPhase(phase, o.Config.Documentation.Language, o.Config.System.ID)
-			if err != nil {
-				progress.fail(phase.ID, err.Error())
-				return model.ValidationResult{}, err
-			}
-			op := "prompt"
-			if phase.Initialize && !fileExists(filepath.Join(root, "openwiki", "quickstart.md")) {
-				op = "init"
-			}
-			label := progress.start(phase.ID, phase.Name)
-			if err := o.runWithRetries(ctx, root, op, prompt, label); err != nil {
-				ps.Status = "failed"
-				ps.Error = err.Error()
-				target.Phases[phase.ID] = ps
-				o.saveSystemTarget(st, target)
-				progress.fail(phase.ID, err.Error())
-				return model.ValidationResult{}, err
-			}
-			ps.Status = "completed"
-			ps.Error = ""
-			ps.CompletedAt = time.Now().UTC()
-			target.Phases[phase.ID] = ps
-			o.saveSystemTarget(st, target)
-			progress.complete(phase.ID, phase.Name)
-		}
-	}
-
-	progress.start("VAL", "Validate whole-system Markdown and catalogs")
-	vr := o.Validator.ValidateSystem(ctx)
-	for round := 1; !vr.Accepted && round <= o.Config.Execution.MaxRepairRounds; round++ {
-		progress.note("VAL", fmt.Sprintf("Repair round %d/%d for %d findings", round, o.Config.Execution.MaxRepairRounds, len(vr.Findings)))
-		repairPrompt, err := prompts.Render("prompts/common/repair.md", o.Config.Documentation.Language, o.Config.System.ID, map[string]string{
-			"FINDINGS":       validation.FindingsText(vr.Findings),
-			"PROFILE_NAME":   "Whole-System Landscape",
-			"COMPONENT_TYPE": "system",
-			"SCOPE":          "aggregation workspace",
-		})
-		if err != nil {
-			progress.fail("VAL", err.Error())
-			return vr, err
-		}
-		label := fmt.Sprintf("system/repair-%d", round)
-		if err := o.runWithRetries(ctx, root, "prompt", repairPrompt, label); err != nil {
-			progress.fail("VAL", err.Error())
-			return vr, err
-		}
-		vr = o.Validator.ValidateSystem(ctx)
-	}
-	if vr.Accepted {
-		progress.complete("VAL", fmt.Sprintf("Validation accepted with score=%d", vr.Score))
-	} else {
-		progress.fail("VAL", fmt.Sprintf("Validation rejected with score=%d findings=%d", vr.Score, len(vr.Findings)))
-	}
-
-	progress.start("FIN", "Write system report, export graph, and checkpoint state")
-	_ = validation.WriteResult(filepath.Join(o.Config.Workspace, ".wikiforge", "validation", "system.json"), vr)
-	if err := graph.Export(o.Config.System.ID, filepath.Join(root, "openwiki"), filepath.Join(o.Config.Workspace, ".wikiforge", "graph", "system")); err != nil {
-		progress.fail("FIN", err.Error())
-		return vr, err
-	}
-	target.GitHead = gitHead(root)
-	target.SourceHash = directoryHash(filepath.Join(root, "sources")) + directoryHash(filepath.Join(root, "facts"))
-	target.DocsHash = directoryHash(filepath.Join(root, "openwiki"))
-	if vr.Accepted {
-		target.Status = "completed"
-	} else {
-		target.Status = "completed-with-findings"
-	}
-	o.saveSystemTarget(st, target)
-	progress.complete("FIN", "Reports, graph, and state written")
-	if !vr.Accepted {
-		return vr, fmt.Errorf("system documentation validation failed with score %d", vr.Score)
-	}
-	return vr, nil
-}
-
 func (o *Orchestrator) runWithRetries(ctx context.Context, workdir, operation, prompt, label string) error {
 	attempts := o.Config.Execution.MaxProcessRetries + 1
 	var last error
 	for i := 1; i <= attempts; i++ {
+		o.metricsMu.Lock()
+		if o.metrics != nil {
+			o.metrics.OpenWikiCalls++
+		}
+		o.metricsMu.Unlock()
 		if attempts > 1 {
 			fmt.Fprintf(o.Out, "[%s] process attempt %d/%d\n", label, i, attempts)
 		}
 		runCtx := openwiki.WithRunLabel(ctx, label)
-		_, err := o.Runner.Run(runCtx, workdir, operation, prompt)
+		output, err := o.Runner.Run(runCtx, workdir, operation, prompt)
+		o.recordUsage(output)
 		if err == nil {
 			return nil
 		}
@@ -508,60 +240,73 @@ func (o *Orchestrator) runWithRetries(ctx context.Context, workdir, operation, p
 	return last
 }
 
-func (o *Orchestrator) writeComponentInstructions(component config.ComponentConfig, profile prompts.Profile) error {
-	content, err := prompts.RenderInstructions(profile, component, o.Config.Documentation.Language)
-	if err != nil {
-		return err
+func (o *Orchestrator) recordUsage(output string) {
+	input := metricValue(output, "input_tokens", "input tokens", "prompt_tokens")
+	outputTokens := metricValue(output, "output_tokens", "output tokens", "completion_tokens")
+	if input == 0 && outputTokens == 0 {
+		return
 	}
-	return writeMergedInstructions(filepath.Join(component.DocumentationRoot(), "INSTRUCTIONS.md"), content)
+	o.metricsMu.Lock()
+	defer o.metricsMu.Unlock()
+	if o.metrics != nil {
+		o.metrics.InputTokens += int64(input)
+		o.metrics.OutputTokens += int64(outputTokens)
+		o.metrics.UsageReported = true
+	}
 }
 
-func (o *Orchestrator) writeSystemInstructions(root string) error {
-	content, err := prompts.RenderTemplate("templates/system-instructions.md", o.Config.Documentation.Language, o.Config.System.ID)
-	if err != nil {
-		return err
-	}
-	return writeMergedInstructions(filepath.Join(root, "openwiki", "INSTRUCTIONS.md"), content)
-}
-
-func writeMergedInstructions(path, content string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	old, _ := os.ReadFile(path)
-	merged := mergeMarker(string(old), content, "<!-- WIKIFORGE:START -->", "<!-- WIKIFORGE:END -->")
-	return os.WriteFile(path, []byte(merged), 0o644)
-}
-
-func mergeMarker(existing, replacement, start, end string) string {
-	replacement = strings.TrimSpace(replacement)
-	if strings.TrimSpace(existing) == "" {
-		return replacement + "\n"
-	}
-	a := strings.Index(existing, start)
-	b := strings.Index(existing, end)
-	if a >= 0 && b >= a {
-		prefix := strings.TrimRight(existing[:a], " \t\r\n")
-		suffix := strings.TrimLeft(existing[b+len(end):], " \t\r\n")
-		var parts []string
-		if prefix != "" {
-			parts = append(parts, prefix)
+func metricValue(text string, labels ...string) int {
+	lower := strings.ToLower(text)
+	for _, label := range labels {
+		start := strings.Index(lower, label)
+		if start < 0 {
+			continue
 		}
-		parts = append(parts, replacement)
-		if suffix != "" {
-			parts = append(parts, suffix)
+		for _, candidate := range []string{":", "=", " ", "\""} {
+			if index := strings.Index(lower[start+len(label):], candidate); index >= 0 {
+				value := lower[start+len(label)+index+len(candidate):]
+				value = strings.TrimLeft(value, " \t\"'")
+				n := 0
+				for n < len(value) && value[n] >= '0' && value[n] <= '9' {
+					n++
+				}
+				if n > 0 {
+					parsed, _ := strconv.Atoi(value[:n])
+					return parsed
+				}
+			}
 		}
-		return strings.Join(parts, "\n\n") + "\n"
 	}
-	return strings.TrimRight(existing, " \t\r\n") + "\n\n" + replacement + "\n"
+	return 0
+}
+
+func (o *Orchestrator) recordPageMetric(update bool) {
+	o.metricsMu.Lock()
+	defer o.metricsMu.Unlock()
+	if o.metrics == nil {
+		return
+	}
+	if update {
+		o.metrics.PagesUpdated++
+	} else {
+		o.metrics.PagesGenerated++
+	}
+}
+
+func (o *Orchestrator) recordEvidenceMetrics(index evidence.Index) {
+	o.metricsMu.Lock()
+	defer o.metricsMu.Unlock()
+	if o.metrics == nil {
+		return
+	}
+	o.metrics.EvidenceFiles += len(index.References)
+	o.metrics.EvidenceCacheHits += index.CacheHits
+	o.metrics.EvidenceCacheMisses += index.CacheMisses
 }
 
 func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.ComponentConfig) error {
 	sourcesRoot := filepath.Join(root, "sources")
 	componentsRoot := filepath.Join(sourcesRoot, "components")
-	if err := os.RemoveAll(componentsRoot); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(componentsRoot, 0o755); err != nil {
 		return err
 	}
@@ -576,6 +321,7 @@ func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.C
 		SourceRepository string   `json:"sourceRepository"`
 		Scope            string   `json:"scope,omitempty"`
 		GitHead          string   `json:"gitHead,omitempty"`
+		SnapshotHash     string   `json:"snapshotHash"`
 		Documentation    string   `json:"documentation"`
 	}
 	manifest := struct {
@@ -590,16 +336,20 @@ func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.C
 		if !fileExists(src) {
 			continue
 		}
-		dst := filepath.Join(componentsRoot, component.ID, "openwiki")
-		if err := copyDir(src, dst); err != nil {
-			return err
+		snapshotHash := directoryHash(src)
+		dst := filepath.Join(componentsRoot, component.ID, snapshotHash, "openwiki")
+		if !fileExists(dst) {
+			if err := copyDir(src, dst); err != nil {
+				return err
+			}
 		}
 		manifest.Components = append(manifest.Components, manifestComponent{
 			ID: component.ID, Type: component.Type, Profile: component.Profile,
 			Group: component.Group, Tags: component.Tags, DependsOn: component.DependsOn,
 			SourceRepository: component.Repository, Scope: component.Scope,
 			GitHead:       gitHead(component.Repository),
-			Documentation: "sources/components/" + component.ID + "/openwiki/quickstart.md",
+			SnapshotHash:  snapshotHash,
+			Documentation: "sources/components/" + component.ID + "/" + snapshotHash + "/openwiki/quickstart.md",
 		})
 	}
 	sort.Slice(manifest.Components, func(i, j int) bool { return manifest.Components[i].ID < manifest.Components[j].ID })
@@ -611,10 +361,7 @@ func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.C
 	if o.Config.System.FactsPath != "" && fileExists(o.Config.System.FactsPath) {
 		dst := filepath.Join(root, "facts")
 		if filepath.Clean(o.Config.System.FactsPath) != filepath.Clean(dst) {
-			if err := os.RemoveAll(dst); err != nil {
-				return err
-			}
-			if err := copyDir(o.Config.System.FactsPath, dst); err != nil {
+			if err := syncDir(o.Config.System.FactsPath, dst); err != nil {
 				return err
 			}
 		}
@@ -670,10 +417,15 @@ func (o *Orchestrator) selectedComponents(id string) []config.ComponentConfig {
 	return out
 }
 
-func repositoryGroups(components []config.ComponentConfig) [][]config.ComponentConfig {
+func repositoryGroups(components []config.ComponentConfig, isolate bool) [][]config.ComponentConfig {
 	byRepo := map[string][]config.ComponentConfig{}
 	for _, component := range components {
 		key := filepath.Clean(component.Repository)
+		if isolate && component.Scope != "" {
+			// Different scoped worktrees can run concurrently. Components with the
+			// same scope still share one key and remain serialized.
+			key += "\x00" + filepath.Clean(component.Scope)
+		}
 		byRepo[key] = append(byRepo[key], component)
 	}
 	keys := make([]string, 0, len(byRepo))
@@ -688,6 +440,38 @@ func repositoryGroups(components []config.ComponentConfig) [][]config.ComponentC
 		groups = append(groups, group)
 	}
 	return groups
+}
+
+func (o *Orchestrator) isolatedComponent(component config.ComponentConfig) (config.ComponentConfig, func() error, error) {
+	if !o.Config.Execution.IsolateSameRepository || strings.TrimSpace(component.Scope) == "" {
+		return component, func() error { return nil }, nil
+	}
+	stageParent := filepath.Join(o.Config.Workspace, ".wikiforge", "staging")
+	if err := os.MkdirAll(stageParent, 0o755); err != nil {
+		return component, func() error { return nil }, fmt.Errorf("create staging root: %w", err)
+	}
+	stageRoot, err := os.MkdirTemp(stageParent, component.ID+"-")
+	if err != nil {
+		return component, func() error { return nil }, fmt.Errorf("create isolated staging for %s: %w", component.ID, err)
+	}
+	if err := copyDir(component.WorkDir(), stageRoot); err != nil {
+		_ = os.RemoveAll(stageRoot)
+		return component, func() error { return nil }, fmt.Errorf("stage component %s: %w", component.ID, err)
+	}
+	if err := ensureGitRepo(stageRoot); err != nil {
+		_ = os.RemoveAll(stageRoot)
+		return component, func() error { return nil }, fmt.Errorf("initialize isolated Git worktree for %s: %w", component.ID, err)
+	}
+	effective := component
+	effective.Repository = stageRoot
+	effective.Scope = ""
+	return effective, func() error {
+		if err := syncDir(filepath.Join(stageRoot, "openwiki"), component.DocumentationRoot()); err != nil {
+			_ = os.RemoveAll(stageRoot)
+			return fmt.Errorf("sync isolated documentation for %s: %w", component.ID, err)
+		}
+		return os.RemoveAll(stageRoot)
+	}, nil
 }
 
 func copyDir(src, dst string) error {
@@ -716,6 +500,76 @@ func copyDir(src, dst string) error {
 		}
 		return closeErr
 	})
+}
+
+func syncDir(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	if err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(src, path)
+		if relErr != nil || rel == "." {
+			return nil
+		}
+		rel = filepath.Clean(rel)
+		seen[rel] = true
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		return copyFile(path, target)
+	}); err != nil {
+		return err
+	}
+	var stale []string
+	_ = filepath.WalkDir(dst, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || path == dst {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dst, path)
+		if relErr == nil && !seen[filepath.Clean(rel)] {
+			stale = append(stale, path)
+		}
+		return nil
+	})
+	sort.Slice(stale, func(i, j int) bool { return len(stale[i]) > len(stale[j]) })
+	for _, path := range stale {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func ensureGitRepo(root string) error {
@@ -757,12 +611,6 @@ func runGit(root string, args ...string) error {
 		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(b)))
 	}
 	return nil
-}
-
-func removeObsoleteDocumentation(root string, relativePaths []string) {
-	for _, rel := range relativePaths {
-		_ = os.Remove(filepath.Join(root, filepath.FromSlash(rel)))
-	}
 }
 
 func fileExists(path string) bool {
@@ -815,21 +663,6 @@ func hashDirectory(root string, skip func(string, os.DirEntry) bool) string {
 		h.Write(b)
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-func migrateState(st *model.RunState) {
-	if st.Components == nil {
-		st.Components = map[string]model.TargetState{}
-	}
-	for id, target := range st.Services {
-		if _, exists := st.Components[id]; !exists {
-			st.Components[id] = target
-		}
-	}
-	st.Services = nil
-	if st.Version < 2 {
-		st.Version = 2
-	}
 }
 
 func printableScope(scope string) string {

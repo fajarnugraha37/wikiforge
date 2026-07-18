@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/config"
 )
 
 func TestExecRunnerBuildsInitUpdateAndPromptCommands(t *testing.T) {
@@ -57,7 +57,7 @@ func TestExecRunnerBuildsInitUpdateAndPromptCommands(t *testing.T) {
 			if string(promptBytes) != "phase prompt" {
 				t.Fatalf("externalized prompt mismatch: %q", string(promptBytes))
 			}
-			matches, err := filepath.Glob(filepath.Join(workdir, ".wikiforge-prompt-*.md"))
+			matches, err := filepath.Glob(filepath.Join(workdir, "openwiki", ".wikiforge-prompt-*.md"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -102,7 +102,27 @@ func TestExecRunnerExternalizesVeryLargePrompt(t *testing.T) {
 	}
 }
 
-func TestExternalizedPromptUsesSingleLineAbsolutePortablePath(t *testing.T) {
+func TestExecRunnerBoundsDiagnosticCapture(t *testing.T) {
+	runner := ExecRunner{Config: config.OpenWikiConfig{
+		Command:         os.Args[0],
+		Args:            []string{"-test.run=TestOpenWikiHelperProcess", "--", "code"},
+		MaxCaptureBytes: 512,
+		TimeoutMinutes:  1,
+		Environment: map[string]string{
+			"WIKIFORGE_HELPER_PROCESS":    "1",
+			"WIKIFORGE_LARGE_OUTPUT_TEST": "1",
+		},
+	}}
+	output, err := runner.Run(context.Background(), t.TempDir(), "prompt", "phase prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) > 512+64 || !strings.Contains(output, "output truncated") {
+		t.Fatalf("diagnostic capture was not bounded: len=%d output=%q", len(output), output)
+	}
+}
+
+func TestExternalizedPromptUsesSingleLineVirtualAbsolutePath(t *testing.T) {
 	workdir := filepath.Join(t.TempDir(), "Project With Spaces", "資料")
 	cliPrompt, toolPath, cleanup, err := externalizePrompt(workdir, "hello")
 	if err != nil {
@@ -122,15 +142,34 @@ func TestExternalizedPromptUsesSingleLineAbsolutePortablePath(t *testing.T) {
 	if strings.ContainsAny(toolPath, "\\\"\r\n") {
 		t.Fatalf("tool path is not portable: %q", toolPath)
 	}
-	if !filepath.IsAbs(filepath.FromSlash(toolPath)) {
-		t.Fatalf("tool path is not absolute: %q", toolPath)
+	if !strings.HasPrefix(toolPath, "/openwiki/") {
+		t.Fatalf("tool path is not an absolute OpenWiki virtual path: %q", toolPath)
 	}
-	b, err := os.ReadFile(filepath.FromSlash(toolPath))
+	hostPath, err := promptHostPath(workdir, toolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(hostPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(b) != "hello" {
 		t.Fatalf("prompt mismatch: %q", string(b))
+	}
+}
+
+func TestPromptHostPathRejectsNonVirtualOrUnsafePaths(t *testing.T) {
+	workdir := t.TempDir()
+	for _, virtualPath := range []string{
+		`C:/repo/prompt.md`,
+		`/tmp/prompt.md`,
+		`/openwiki/../prompt.md`,
+		`/openwiki/nested/prompt.md`,
+		`/openwiki/..\\prompt.md`,
+	} {
+		if _, err := promptHostPath(workdir, virtualPath); err == nil {
+			t.Fatalf("expected unsafe virtual path to be rejected: %q", virtualPath)
+		}
 	}
 }
 
@@ -140,8 +179,8 @@ func TestExecRunnerRejectsClarificationResponse(t *testing.T) {
 		Args:           []string{"-test.run=TestOpenWikiHelperProcess", "--", "code"},
 		TimeoutMinutes: 1,
 		Environment: map[string]string{
-			"WIKIFORGE_HELPER_PROCESS":       "1",
-			"WIKIFORGE_CLARIFICATION_TEST":   "1",
+			"WIKIFORGE_HELPER_PROCESS":      "1",
+			"WIKIFORGE_CLARIFICATION_TEST":  "1",
 			"WIKIFORGE_CAPTURE_PROMPT_PATH": filepath.Join(t.TempDir(), "prompt.txt"),
 		},
 	}}
@@ -173,6 +212,55 @@ func TestExecRunnerCheck(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "--help") {
 		t.Fatalf("help flag missing: %q", string(b))
+	}
+}
+
+func TestRealOpenWikiSmoke(t *testing.T) {
+	if os.Getenv("WIKIFORGE_REAL_OPENWIKI") != "1" {
+		t.Skip("set WIKIFORGE_REAL_OPENWIKI=1 to run the credential/provider-backed OpenWiki smoke lane")
+	}
+	cfg := config.Defaults().OpenWiki
+	if command := os.Getenv("WIKIFORGE_OPENWIKI_COMMAND"); command != "" {
+		cfg.Command = command
+	}
+	if err := (ExecRunner{Config: cfg}).Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRealOpenWikiGeneration(t *testing.T) {
+	if os.Getenv("WIKIFORGE_REAL_OPENWIKI_GENERATION") != "1" {
+		t.Skip("set WIKIFORGE_REAL_OPENWIKI_GENERATION=1 to run a real provider-backed generation")
+	}
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "README.md"), []byte("# Real OpenWiki integration fixture\n\nThis repository contains a deterministic integration fixture.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults().OpenWiki
+	if command := os.Getenv("WIKIFORGE_OPENWIKI_COMMAND"); command != "" {
+		cfg.Command = command
+	}
+	if modelID := os.Getenv("WIKIFORGE_OPENWIKI_MODEL_ID"); modelID != "" {
+		cfg.ModelID = modelID
+	}
+	runner := ExecRunner{Config: cfg}
+	prompt := "Read README.md in this repository and create openwiki/quickstart.md. Include YAML front matter, a title, a concise repository summary, a Knowledge Gaps section, a Source References section citing README.md, and do not invent facts."
+	if _, err := runner.Run(context.Background(), workdir, "prompt", prompt); err != nil {
+		t.Fatal(err)
+	}
+	generatedPath := filepath.Join(workdir, "openwiki", "quickstart.md")
+	if _, err := os.Stat(generatedPath); err != nil {
+		t.Fatalf("real OpenWiki generation did not create quickstart.md: %v", err)
+	}
+	generated, err := os.ReadFile(generatedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(generated)
+	for _, required := range []string{"---", "Source References", "README.md"} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("real OpenWiki output missing %q:\n%s", required, content)
+		}
 	}
 }
 
@@ -214,6 +302,10 @@ func TestOpenWikiHelperProcess(t *testing.T) {
 		time.Sleep(60 * time.Millisecond)
 		os.Exit(0)
 	}
+	if os.Getenv("WIKIFORGE_LARGE_OUTPUT_TEST") == "1" {
+		fmt.Print(strings.Repeat("large-output ", 10000))
+		os.Exit(0)
+	}
 	if os.Getenv("WIKIFORGE_CLARIFICATION_TEST") == "1" {
 		fmt.Println("I do not see a file path. Could you clarify what you would like me to do?")
 		os.Exit(0)
@@ -231,7 +323,11 @@ func TestOpenWikiHelperProcess(t *testing.T) {
 			if strings.ContainsAny(toolPath, "\"\r\n") {
 				os.Exit(23)
 			}
-			b, err := os.ReadFile(filepath.FromSlash(toolPath))
+			hostPath, pathErr := promptHostPath(".", toolPath)
+			if pathErr != nil {
+				os.Exit(24)
+			}
+			b, err := os.ReadFile(hostPath)
 			if err == nil {
 				_ = os.WriteFile(promptCapture, b, 0o644)
 			}

@@ -1,0 +1,12 @@
+[
+  {"id":"small-monolith","type":"monolith","profile":"application","minimumPages":1,"requiredViews":["component","flow","catalog"],"minimumPlanCoverage":1,"minimumIndexes":2,"requiresCollection":true},
+  {"id":"large-modular-monolith","type":"modular-monolith","profile":"modular-application","minimumPages":1,"requiredViews":["component","domain","flow","catalog"],"minimumPlanCoverage":1,"minimumIndexes":3,"requiresCollection":true},
+  {"id":"microservices-monorepo","type":"microservice","profile":"application","minimumPages":1,"requiredViews":["component","flow","catalog"],"minimumPlanCoverage":1,"minimumIndexes":2,"requiresCollection":true},
+  {"id":"event-driven-system","type":"microservice","profile":"application","minimumPages":1,"requiredViews":["flow","catalog"],"minimumPlanCoverage":1,"minimumIndexes":1,"requiresCollection":true},
+  {"id":"bpmn-application","type":"application","profile":"application","minimumPages":1,"requiredViews":["component","flow"],"minimumPlanCoverage":1,"requiredPacks":["bpmn","workflow"],"minimumIndexes":2,"requiresCollection":true},
+  {"id":"multi-store-application","type":"application","profile":"application","minimumPages":1,"requiredViews":["component","catalog"],"minimumPlanCoverage":1,"minimumIndexes":2,"requiresCollection":true},
+  {"id":"redis-multi-role","type":"infrastructure","profile":"infrastructure","minimumPages":1,"requiredViews":["platform","operations"],"minimumPlanCoverage":1,"minimumIndexes":2},
+  {"id":"internal-framework","type":"framework","profile":"reusable","minimumPages":1,"requiredViews":["component","engineering"],"minimumPlanCoverage":1,"minimumIndexes":2,"requiresCollection":true},
+  {"id":"shared-library","type":"library","profile":"reusable","minimumPages":1,"requiredViews":["component","engineering"],"minimumPlanCoverage":1,"minimumIndexes":2,"requiresCollection":true},
+  {"id":"contracts","type":"contracts","profile":"contracts","minimumPages":1,"requiredViews":["component","catalog"],"minimumPlanCoverage":1,"minimumIndexes":2,"requiresCollection":true}
+]

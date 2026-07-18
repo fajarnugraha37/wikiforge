@@ -65,10 +65,15 @@ func Resolve(base, value string) (string, error) {
 		return "", err
 	}
 	expanded = strings.ReplaceAll(expanded, `\`, `/`)
-	native := filepath.FromSlash(expanded)
-	if !filepath.IsAbs(native) {
-		native = filepath.Join(base, native)
+	if IsAbsoluteAny(expanded) {
+		native := filepath.FromSlash(expanded)
+		if !filepath.IsAbs(native) {
+			return "", fmt.Errorf("absolute path is not valid on this operating system: %q", value)
+		}
+		return filepath.Abs(filepath.Clean(native))
 	}
+	native := filepath.FromSlash(expanded)
+	native = filepath.Join(base, native)
 	return filepath.Abs(filepath.Clean(native))
 }
 

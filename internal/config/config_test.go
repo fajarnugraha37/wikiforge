@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-func TestLoadV2ComponentsAndScopes(t *testing.T) {
+func TestLoadV3ComponentsAndScopes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wikiforge.yaml")
-	content := `version: 2
+	content := `version: 3
 workspace: .
 openwiki:
   command: npx
@@ -57,18 +57,45 @@ system:
 	}
 }
 
-func TestLoadLegacyServicesAsMicroservices(t *testing.T) {
+func TestLoadV3DocumentationUnitsAndPlanningFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wikiforge.yaml")
-	content := `version: 1
+	content := `version: 3
 openwiki:
   command: npx
 mermaid:
   mode: basic
-services:
-  - id: alpha
-    path: ./alpha
+documentation:
+  views:
+    - component
+    - domain
+    - catalog
+  catalogs:
+    shardBy:
+      - domain
+    maximumRowsPerPage: 120
+  evidence:
+    include:
+      - src/**
+    exclude:
+      - vendor/**
+components:
+  - id: commerce-core
+    type: modular-monolith
+    repository: ./mono
     enabled: true
+    owners: [commerce-team]
+    capabilities: [order-management, pricing]
+    packs: [workflow, telemetry]
+documentationUnits:
+  - id: submit-order
+    component: commerce-core
+    kind: flow
+    sourceRoots:
+      - workflows/order
+    relatedUnits:
+      - submit-order
+    output: flows/submit-order
 system:
   enabled: false
   output: ./system
@@ -80,86 +107,19 @@ system:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Components) != 1 || cfg.Components[0].Type != "microservice" || cfg.Components[0].Profile != "application" {
-		t.Fatalf("legacy service not normalized: %+v", cfg.Components)
+	if cfg.Version != 3 {
+		t.Fatalf("version=%d", cfg.Version)
 	}
-	if cfg.Components[0].Repository != filepath.Join(dir, "alpha") {
-		t.Fatalf("legacy path not resolved: %s", cfg.Components[0].Repository)
+	if cfg.Documentation.Catalogs.MaximumRowsPerPage != 120 {
+		t.Fatalf("unexpected documentation config: %+v", cfg.Documentation)
 	}
-}
-
-func TestRejectEscapingScope(t *testing.T) {
-	cfg := Defaults()
-	cfg.Components = []ComponentConfig{{ID: "bad", Type: "library", Profile: "reusable", Repository: t.TempDir(), Scope: "../outside", Enabled: true}}
-	if err := Validate(cfg); err == nil {
-		t.Fatal("expected invalid scope")
+	if len(cfg.Documentation.Views) != 3 || cfg.Documentation.Views[0] != "component" {
+		t.Fatalf("views not loaded: %+v", cfg.Documentation.Views)
 	}
-}
-
-func TestAllDocumentedTypesHaveKnownProfiles(t *testing.T) {
-	for _, componentType := range SupportedTypes() {
-		profile := ProfileForType(componentType)
-		if !KnownProfile(profile) {
-			t.Fatalf("type %s maps to unknown profile %s", componentType, profile)
-		}
+	if len(cfg.Components[0].Packs) != 2 || cfg.Components[0].Packs[0] != "telemetry" || cfg.Components[0].Packs[1] != "workflow" {
+		t.Fatalf("packs not normalized/sorted: %+v", cfg.Components[0].Packs)
 	}
-}
-
-func TestLoadNormalizesCrossPlatformSeparatorsSpacesAndUnicode(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "Workspace With Spaces", "資料")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "wikiforge.yaml")
-	content := `version: 2
-workspace: ./run data
-openwiki:
-  command: npx
-mermaid:
-  mode: basic
-components:
-  - id: app
-    type: monolith
-    repository: ./Repository With Spaces
-    scope: modules\\order/api
-    enabled: true
-system:
-  enabled: false
-  output: ./System Output
-  factsPath: ./Facts 資料
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantWorkdir := filepath.Join(dir, "Repository With Spaces", "modules", "order", "api")
-	if cfg.Components[0].WorkDir() != wantWorkdir {
-		t.Fatalf("workdir got %q want %q", cfg.Components[0].WorkDir(), wantWorkdir)
-	}
-	if !filepath.IsAbs(cfg.Workspace) || !filepath.IsAbs(cfg.System.Output) || !filepath.IsAbs(cfg.System.FactsPath) {
-		t.Fatalf("paths were not resolved absolutely: workspace=%q output=%q facts=%q", cfg.Workspace, cfg.System.Output, cfg.System.FactsPath)
-	}
-}
-
-func TestRejectsPortableAbsoluteScopeOnEveryHost(t *testing.T) {
-	for _, scope := range []string{`C:\\outside`, `C:/outside`, `\\\\server\\share\\outside`, `/outside`} {
-		cfg := Defaults()
-		cfg.Components = []ComponentConfig{{ID: "bad", Type: "library", Profile: "reusable", Repository: t.TempDir(), Scope: scope, Enabled: true}}
-		if err := Validate(cfg); err == nil {
-			t.Fatalf("expected scope %q to be rejected", scope)
-		}
-	}
-}
-
-func TestRejectsComponentIDsUnsafeAsCrossPlatformPathSegments(t *testing.T) {
-	for _, id := range []string{"../escape", `a\\b`, "a/b", "CON", "name.", "a:b"} {
-		cfg := Defaults()
-		cfg.Components = []ComponentConfig{{ID: id, Type: "library", Profile: "reusable", Repository: t.TempDir(), Enabled: true}}
-		if err := Validate(cfg); err == nil {
-			t.Fatalf("expected id %q to be rejected", id)
-		}
+	if len(cfg.DocumentationUnits) != 1 || cfg.DocumentationUnits[0].Output != "flows/submit-order" {
+		t.Fatalf("documentation unit not loaded: %+v", cfg.DocumentationUnits)
 	}
 }

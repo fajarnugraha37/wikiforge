@@ -10,7 +10,7 @@ Release: `1.2.3`
 - OpenWiki executable runner contract tests:
   - `--init --print`;
   - `--update --print`;
-  - phased prompt mode;
+  - init, update, and adaptive prompt operations;
   - `--modelId` propagation;
   - help/doctor command boundary;
   - live stdout/stderr forwarding;
@@ -36,11 +36,11 @@ Release: `1.2.3`
   - Mermaid input/output placeholder preservation.
 - Doctor prompt-transport preflight:
   - temporary file creation;
-  - absolute external-tool path conversion;
-  - reopen through converted path;
+  - conversion to an absolute `/openwiki/...` virtual path;
+  - reopen through the mapped host path;
   - cleanup.
 - Deterministic invocation/path failures skip retries; transient provider errors remain retryable.
-- Documentation contract tests and end-to-end fake-runner orchestration for every profile, monorepo scopes, whole-system aggregation, validation, repair, reports, graph export, state, and update no-op behaviour.
+- Adaptive planner and end-to-end fake-runner orchestration for profiles, monorepo scopes, whole-system aggregation, validation, repair, reports, graph export, state, and update no-op behaviour.
 - Cross-compilation:
   - Linux amd64 and arm64;
   - Windows amd64 and arm64;
@@ -50,4 +50,4 @@ Release: `1.2.3`
 
 The production runner invokes the configured OpenWiki CLI. The default configuration remains pinned to `openwiki@0.2.0` through `npx`, and Mermaid rendering remains pinned to `@mermaid-js/mermaid-cli@11.12.0`.
 
-A live model-backed generation was not executed in this build environment because no model-provider credential was supplied. The executable boundary, prompt-file transport, arguments, streaming, heartbeat, cancellation, timeout, retry classification, phased orchestration, validation, repair, and aggregation are covered by automated tests.
+A live model-backed generation was not executed in this build environment because no model-provider credential was supplied. The executable boundary, prompt-file transport, arguments, streaming, heartbeat, cancellation, timeout, retry classification, adaptive orchestration, validation, repair, and aggregation are covered by automated tests.

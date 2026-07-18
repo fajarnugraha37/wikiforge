@@ -1,8 +1,9 @@
 package validation
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,10 +15,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/wikiforge/internal/config"
-	"github.com/example/wikiforge/internal/model"
-	"github.com/example/wikiforge/internal/pathutil"
-	"github.com/example/wikiforge/internal/prompts"
+	"github.com/fajarnugraha37/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/evidence"
+	"github.com/fajarnugraha37/wikiforge/internal/model"
+	"github.com/fajarnugraha37/wikiforge/internal/pathutil"
+	"github.com/fajarnugraha37/wikiforge/internal/planner"
+	"github.com/fajarnugraha37/wikiforge/internal/prompts"
 )
 
 var (
@@ -25,6 +28,8 @@ var (
 	mermaidRE      = regexp.MustCompile("(?s)```mermaid\\s*\\n(.*?)```")
 	backtickPathRE = regexp.MustCompile("`([^`]+[/\\\\][^`]+|[^`]+\\.[A-Za-z0-9]{1,12}(?::[0-9]+)?)`")
 	lineSuffixRE   = regexp.MustCompile(`(?i)(?::[0-9]+(?:-[0-9]+)?|#L[0-9]+(?:-L[0-9]+)?)$`)
+	privateKeyRE   = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)
+	credentialRE   = regexp.MustCompile(`(?im)\b(api[_-]?key|access[_-]?token|password|client[_-]?secret)\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{12,})`)
 	progressMu     sync.Mutex
 )
 
@@ -32,22 +37,35 @@ type Validator struct {
 	Config config.Config
 }
 
-func (v Validator) ValidateComponent(ctx context.Context, component config.ComponentConfig) model.ValidationResult {
-	profile, err := prompts.GetProfile(component.Profile)
-	if err != nil {
-		return model.ValidationResult{Root: component.DocumentationRoot(), Profile: component.Profile, Score: 0, Accepted: false, Findings: []model.Finding{{Code: "PROFILE-UNKNOWN", Severity: "error", Message: err.Error()}}}
+type mermaidRenderJob struct {
+	rel     string
+	index   int
+	total   int
+	content string
+}
+
+func (v Validator) ValidateAdaptiveComponent(ctx context.Context, component config.ComponentConfig, plan planner.ComponentPlan) model.ValidationResult {
+	contracts := map[string]model.PageContract{}
+	expected := make([]string, 0, len(plan.Pages))
+	for _, page := range plan.Pages {
+		expected = append(expected, filepath.ToSlash(page.Path))
+		contracts[filepath.ToSlash(page.Path)] = prompts.AdaptivePageContract(page.Path, string(page.Kind))
 	}
-	return v.validate(ctx, component.ID, component.DocumentationRoot(), component.WorkDir(), prompts.ExpectedFiles(profile), prompts.ComponentPageContracts(profile), profile.ID, profile.MinimumPages, profile.MinimumMermaid)
+	result := v.validate(ctx, component.ID, component.DocumentationRoot(), component.WorkDir(), expected, contracts, "adaptive/"+plan.Profile, 0, 0)
+	validateHierarchy(component.ID, component.DocumentationRoot(), plan.Pages, &result)
+	return finalizeValidationResult(result, v.Config.Documentation.MinimumQualityScore)
 }
 
-// ValidateService remains as a source-compatible wrapper for v1 callers.
-func (v Validator) ValidateService(ctx context.Context, service config.ServiceConfig) model.ValidationResult {
-	component := config.ComponentConfig{ID: service.ID, Type: "microservice", Profile: "application", Repository: service.Path, Enabled: service.Enabled}
-	return v.ValidateComponent(ctx, component)
-}
-
-func (v Validator) ValidateSystem(ctx context.Context) model.ValidationResult {
-	return v.validate(ctx, v.Config.System.ID, filepath.Join(v.Config.System.Output, "openwiki"), v.Config.System.Output, prompts.ExpectedSystemFiles(), prompts.SystemPageContracts(), "system", len(prompts.ExpectedSystemFiles()), 8)
+func (v Validator) ValidateAdaptiveSystem(ctx context.Context, root string, plan planner.SystemPlan) model.ValidationResult {
+	contracts := map[string]model.PageContract{}
+	expected := make([]string, 0, len(plan.Pages))
+	for _, page := range plan.Pages {
+		expected = append(expected, filepath.ToSlash(page.Path))
+		contracts[filepath.ToSlash(page.Path)] = prompts.AdaptivePageContract(page.Path, string(page.Kind))
+	}
+	result := v.validate(ctx, "system", root, filepath.Dir(root), expected, contracts, "adaptive/system", 0, 0)
+	validateHierarchy("system", root, plan.Pages, &result)
+	return finalizeValidationResult(result, v.Config.Documentation.MinimumQualityScore)
 }
 
 func (v Validator) validate(ctx context.Context, targetID, root, sourceBase string, expected []string, contracts map[string]model.PageContract, profile string, profileMinimumPages, profileMinimumMermaid int) model.ValidationResult {
@@ -89,6 +107,7 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 	for path, contract := range contracts {
 		contractByOutput[filepath.ToSlash(path)] = contract
 	}
+	var mermaidJobs []mermaidRenderJob
 
 	for fileIndex, path := range files {
 		rel, _ := filepath.Rel(root, path)
@@ -112,7 +131,11 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 			}
 			allowedFrontmatter := map[string]bool{"type": true, "title": true, "description": true, "resource": true, "tags": true}
 			for _, key := range keys {
-				if !allowedFrontmatter[key] {
+				allowed := allowedFrontmatter[key]
+				if v.Config.Documentation.FrontMatterPolicy == "namespaced" && (key == "wikiforge" || strings.HasPrefix(key, "wikiforge.")) {
+					allowed = true
+				}
+				if !allowed {
 					add("DOC-FRONTMATTER-UNSUPPORTED", "error", rel, "unsupported OpenWiki front matter field: "+key)
 				}
 			}
@@ -120,6 +143,9 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 		upper := strings.ToUpper(content)
 		if strings.Contains(upper, "TODO") || strings.Contains(upper, "TBD") {
 			add("DOC-PLACEHOLDER", "warning", rel, "contains TODO/TBD; use an explicit Knowledge Gaps entry instead")
+		}
+		if privateKeyRE.MatchString(content) || credentialValuePresent(content) {
+			add("SECRET-LEAK", "error", rel, "generated documentation contains a private key or credential-like value")
 		}
 		if v.Config.Documentation.RequireSourceReferences {
 			sourceSection := sectionContent(content, "Source References")
@@ -130,19 +156,34 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 			} else if v.Config.Documentation.ValidateSourcePaths {
 				for _, ref := range extractSourcePaths(sourceSection) {
 					if !sourceReferenceExists(sourceBase, path, ref) {
-						add("DOC-SOURCE-PATH", "warning", rel, "source reference does not resolve in the configured scope: "+ref)
+						severity := "warning"
+						code := "DOC-SOURCE-PATH"
+						if v.Config.Documentation.RequireVerifiedEvidence && strings.Contains(strings.ToLower(content), "verified") {
+							severity = "error"
+							code = "DOC-SOURCE-VERIFIED-UNRESOLVED"
+						}
+						add(code, severity, rel, "source reference does not resolve in the configured scope: "+ref)
 					}
 				}
 			}
 		}
 		for _, m := range linkRE.FindAllStringSubmatch(content, -1) {
 			target := strings.TrimSpace(strings.Split(m[1], "#")[0])
-			if target == "" || isExternalReference(target) || strings.HasPrefix(target, "/") {
+			if target == "" || isExternalReference(target) {
 				continue
 			}
-			resolved := filepath.Clean(filepath.Join(filepath.Dir(path), filepath.FromSlash(target)))
+			var resolved string
+			if strings.HasPrefix(target, "/") {
+				resolved = filepath.Clean(filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(target, "/"))))
+			} else {
+				resolved = filepath.Clean(filepath.Join(filepath.Dir(path), filepath.FromSlash(target)))
+			}
 			if _, err := os.Stat(resolved); err != nil {
-				add("DOC-BROKEN-LINK", "error", rel, "broken relative link: "+target)
+				code := "DOC-BROKEN-LINK"
+				if strings.HasPrefix(target, "/") {
+					code = "DOC-BROKEN-ABSOLUTE-LINK"
+				}
+				add(code, "error", rel, "broken internal link: "+target)
 			}
 		}
 
@@ -159,7 +200,20 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 					add("DOC-REQUIRED-TABLE", "error", rel, "missing required catalog table header: "+contract.RequiredTableHeader)
 				} else if !catalogHasDataRow(content, contract.RequiredTableHeader) {
 					add("DOC-CATALOG-EMPTY", "error", rel, "catalog must contain at least one evidence-backed or explicit Not Observed/Unknown row")
+				} else {
+					rows, bytes := catalogTableStats(content, contract.RequiredTableHeader)
+					if contract.MaximumRowsPerShard > 0 && rows > contract.MaximumRowsPerShard {
+						add("CATALOG-ROW-LIMIT", "error", rel, fmt.Sprintf("catalog contains %d data rows; maximum is %d", rows, contract.MaximumRowsPerShard))
+					}
+					if contract.MaximumBytes > 0 && bytes > contract.MaximumBytes {
+						add("CATALOG-BYTE-LIMIT", "error", rel, fmt.Sprintf("catalog table is %d bytes; maximum is %d", bytes, contract.MaximumBytes))
+					}
 				}
+			}
+			adaptiveSemantic := strings.HasPrefix(profile, "adaptive/") || profile == "adaptive/system"
+			semanticFindings := validateSemanticTables(rel, content, adaptiveSemantic && v.Config.Documentation.RequireCatalogIdentity, adaptiveSemantic && v.Config.Documentation.RequireRelationshipEvidence)
+			for _, finding := range semanticFindings {
+				add(finding.Code, finding.Severity, finding.Path, finding.Message)
 			}
 		}
 
@@ -175,9 +229,7 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 				add("MERMAID-BASIC", "error", rel, fmt.Sprintf("diagram %d: %v", i+1, err))
 			}
 			if v.Config.Mermaid.Mode == "render" {
-				if err := v.renderMermaid(ctx, targetID, rel, i, len(blocks), block[1]); err != nil {
-					add("MERMAID-RENDER", "error", rel, fmt.Sprintf("diagram %d failed to render: %v", i+1, err))
-				}
+				mermaidJobs = append(mermaidJobs, mermaidRenderJob{rel: rel, index: i, total: len(blocks), content: block[1]})
 			}
 		}
 
@@ -198,21 +250,9 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 			}
 		}
 	}
-
-	quickstartPath := filepath.Join(root, "quickstart.md")
-	if b, err := os.ReadFile(quickstartPath); err == nil {
-		linked := map[string]bool{}
-		for _, match := range linkRE.FindAllStringSubmatch(string(b), -1) {
-			target := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(strings.Split(match[1], "#")[0], "./")))
-			linked[target] = true
-		}
-		for _, expectedPath := range expected {
-			if expectedPath == "quickstart.md" {
-				continue
-			}
-			if !linked[filepath.ToSlash(expectedPath)] {
-				add("DOC-NAVIGATION", "error", "quickstart.md", "canonical page is not linked: "+expectedPath)
-			}
+	for _, result := range v.renderMermaidJobs(ctx, targetID, mermaidJobs) {
+		if result.err != nil {
+			add("MERMAID-RENDER", "error", result.job.rel, fmt.Sprintf("diagram %d failed to render: %v", result.job.index+1, result.err))
 		}
 	}
 
@@ -232,18 +272,329 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 		}
 	}
 
-	errorsCount, warningsCount := 0, 0
+	errorsCount := 0
 	for _, f := range result.Findings {
 		if f.Severity == "error" {
 			errorsCount++
-		} else {
-			warningsCount++
 		}
 	}
-	result.Score = max(0, 100-errorsCount*8-warningsCount*2)
+	setValidationDimensions(&result)
+	result.Score = dimensionAverage(result.Dimensions)
 	result.Accepted = errorsCount == 0 && result.Score >= v.Config.Documentation.MinimumQualityScore
 	validationProgress(targetID, "validation pass completed | accepted=%t | score=%d | findings=%d | mermaid=%d", result.Accepted, result.Score, len(result.Findings), result.MermaidBlocks)
 	return result
+}
+
+func credentialValuePresent(content string) bool {
+	for _, match := range credentialRE.FindAllStringSubmatch(content, -1) {
+		value := strings.ToLower(strings.TrimSpace(match[2]))
+		if value == "replace-me" || value == "change-me" || value == "example-value" || strings.Contains(value, "example") || strings.Contains(value, "<") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func validateHierarchy(targetID, root string, pages []planner.PlannedPage, result *model.ValidationResult) {
+	add := func(path, message string) {
+		result.Findings = append(result.Findings, model.Finding{Code: "DOC-NAVIGATION", Severity: "error", Path: path, Message: message})
+	}
+	pageByPath := map[string]planner.PlannedPage{}
+	for _, page := range pages {
+		page.Path = filepath.ToSlash(filepath.Clean(page.Path))
+		pageByPath[page.Path] = page
+	}
+	linksFor := func(from string) map[string]bool {
+		out := map[string]bool{}
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(from)))
+		if err != nil {
+			return out
+		}
+		for _, match := range linkRE.FindAllStringSubmatch(string(b), -1) {
+			target := strings.TrimSpace(strings.Split(match[1], "#")[0])
+			if target == "" || isExternalReference(target) {
+				continue
+			}
+			candidate := filepath.Join(filepath.Dir(filepath.FromSlash(from)), filepath.FromSlash(target))
+			if strings.HasPrefix(target, "/") {
+				candidate = filepath.FromSlash(strings.TrimPrefix(target, "/"))
+			}
+			resolved, err := filepath.Rel(root, filepath.Join(root, candidate))
+			if err != nil {
+				continue
+			}
+			out[filepath.ToSlash(filepath.Clean(resolved))] = true
+		}
+		return out
+	}
+	for path, page := range pageByPath {
+		if page.Kind != planner.PageIndex && page.Kind != planner.PageCollection {
+			continue
+		}
+		children := directNavigationChildren(path, page, pageByPath)
+		if len(children) == 0 {
+			continue
+		}
+		links := linksFor(path)
+		for _, child := range children {
+			if !links[child] {
+				add(path, "index must link its direct child: "+child)
+			}
+		}
+		if path == "quickstart.md" {
+			for linked := range links {
+				if child, ok := pageByPath[linked]; ok && child.Kind != planner.PageIndex {
+					add(path, "root quickstart must link view indexes, not leaf pages: "+linked)
+				}
+			}
+		}
+	}
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() || d.Name() == "INSTRUCTIONS.md" || !strings.HasSuffix(strings.ToLower(path), ".md") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if _, planned := pageByPath[rel]; !planned {
+			add(rel, "Markdown page is not part of the planned documentation hierarchy")
+		}
+		return nil
+	})
+	_ = targetID
+}
+
+func directNavigationChildren(path string, page planner.PlannedPage, pages map[string]planner.PlannedPage) []string {
+	var children []string
+	if path == "quickstart.md" {
+		for candidate, child := range pages {
+			if child.Kind == planner.PageIndex && candidate != path && strings.Count(candidate, "/") == 1 {
+				children = append(children, candidate)
+			}
+		}
+	} else if page.Kind == planner.PageCollection {
+		base := strings.TrimSuffix(path, "/index.md")
+		for candidate, child := range pages {
+			if child.Kind == planner.PageShard && filepath.ToSlash(filepath.Dir(candidate)) == base {
+				children = append(children, candidate)
+			}
+		}
+	} else {
+		base := strings.TrimSuffix(path, "/index.md")
+		for candidate := range pages {
+			if candidate == path {
+				continue
+			}
+			candidateDir := filepath.ToSlash(filepath.Dir(candidate))
+			if candidateDir == base {
+				children = append(children, candidate)
+				continue
+			}
+			if strings.Count(path, "/") == 1 && page.Kind == planner.PageIndex && childIsUnitOrCollectionIndex(candidate, base, pages) {
+				children = append(children, candidate)
+			}
+		}
+	}
+	sort.Strings(children)
+	return children
+}
+
+func childIsUnitOrCollectionIndex(candidate, base string, pages map[string]planner.PlannedPage) bool {
+	if !strings.HasPrefix(candidate, base+"/") || !strings.HasSuffix(candidate, "/index.md") {
+		return false
+	}
+	child, ok := pages[candidate]
+	return ok && child.Kind == planner.PageIndex || ok && child.Kind == planner.PageCollection
+}
+
+func finalizeValidationResult(result model.ValidationResult, minimumScore int) model.ValidationResult {
+	errorsCount := 0
+	for _, finding := range result.Findings {
+		if finding.Severity == "error" {
+			errorsCount++
+		}
+	}
+	setValidationDimensions(&result)
+	result.Score = dimensionAverage(result.Dimensions)
+	result.Accepted = errorsCount == 0 && result.Score >= minimumScore
+	return result
+}
+
+// Recalculate applies the same acceptance policy after external findings are added.
+func Recalculate(result model.ValidationResult, minimumScore int) model.ValidationResult {
+	return finalizeValidationResult(result, minimumScore)
+}
+
+func Strict(result model.ValidationResult, minimumScore int) model.ValidationResult {
+	for index := range result.Findings {
+		if result.Findings[index].Severity == "warning" {
+			result.Findings[index].Severity = "error"
+		}
+	}
+	return finalizeValidationResult(result, minimumScore)
+}
+
+func ValidateEvidenceBacked(root string, index evidence.Index) []model.Finding {
+	findings := evidenceFindings(root, index)
+	return findings
+}
+
+func evidenceFindings(root string, index evidence.Index) []model.Finding {
+	depsByPage := map[string]int{}
+	knownEvidence := map[string]bool{}
+	var findings []model.Finding
+	for _, ref := range index.References {
+		knownEvidence[ref.ID] = true
+	}
+	for _, dep := range index.Dependencies {
+		depsByPage[dep.PageID]++
+		if !knownEvidence[dep.EvidenceID] {
+			findings = append(findings, model.Finding{Code: "EVIDENCE-BROKEN", Severity: "error", Path: dep.PageID, Message: "evidence dependency does not resolve: " + dep.EvidenceID})
+		}
+	}
+	conceptOwners := map[string]string{}
+	verifiedRE := regexp.MustCompile(`(?i)\bVerified\b`)
+	conceptRE := regexp.MustCompile("(?im)^\\s*(concept\\s+id|id)\\s*:\\s*`?([A-Za-z0-9._/-]+)`?\\s*$")
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".md") || d.Name() == "INSTRUCTIONS.md" {
+			return nil
+		}
+		contentBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		pageID := evidence.CanonicalPath(rel)
+		content := string(contentBytes)
+		if verifiedRE.MatchString(content) && depsByPage[pageID] == 0 {
+			findings = append(findings, model.Finding{Code: "EVIDENCE-UNRESOLVED", Severity: "error", Path: filepath.ToSlash(rel), Message: "Verified claim has no resolvable evidence dependency"})
+		}
+		for _, match := range conceptRE.FindAllStringSubmatch(content, -1) {
+			conceptID := strings.ToLower(match[2])
+			if owner, exists := conceptOwners[conceptID]; exists && owner != filepath.ToSlash(rel) {
+				findings = append(findings, model.Finding{Code: "GRAPH-DUPLICATE-CONCEPT", Severity: "error", Path: filepath.ToSlash(rel), Message: "duplicate concept identity " + conceptID + "; first declared in " + owner})
+			} else {
+				conceptOwners[conceptID] = filepath.ToSlash(rel)
+			}
+		}
+		findings = append(findings, catalogIdentityFindings(filepath.ToSlash(rel), content)...)
+		return nil
+	})
+	return findings
+}
+
+func catalogIdentityFindings(path, content string) []model.Finding {
+	var findings []model.Finding
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	seen := map[string]bool{}
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "|") || !strings.Contains(strings.ToLower(trimmed), " id ") {
+			continue
+		}
+		cells := strings.Split(strings.Trim(trimmed, "|"), "|")
+		if len(cells) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(cells[0])), "id") {
+			continue
+		}
+		for _, row := range lines[i+2:] {
+			row = strings.TrimSpace(row)
+			if !strings.HasPrefix(row, "|") {
+				break
+			}
+			rowCells := strings.Split(strings.Trim(row, "|"), "|")
+			if len(rowCells) == 0 || strings.Trim(strings.TrimSpace(rowCells[0]), "-:") == "" {
+				continue
+			}
+			id := strings.TrimSpace(rowCells[0])
+			if id == "" || strings.EqualFold(id, "unknown") || strings.EqualFold(id, "not observed") {
+				continue
+			}
+			if seen[id] {
+				findings = append(findings, model.Finding{Code: "CATALOG-DUPLICATE-ID", Severity: "error", Path: path, Message: "duplicate catalog entry ID: " + id})
+			}
+			seen[id] = true
+		}
+	}
+	return findings
+}
+
+func setValidationDimensions(result *model.ValidationResult) {
+	dimensions := map[string]model.DimensionResult{}
+	counts := map[string][2]int{}
+	for _, finding := range result.Findings {
+		name := validationDimension(finding.Code)
+		entry := dimensions[name]
+		entry.FindingCodes = append(entry.FindingCodes, finding.Code)
+		dimensions[name] = entry
+		count := counts[name]
+		if finding.Severity == "error" {
+			count[0]++
+		} else {
+			count[1]++
+		}
+		counts[name] = count
+	}
+	for _, name := range []string{"structure", "navigation", "evidence", "coverage", "semantic consistency", "catalog integrity", "graph integrity", "security", "freshness", "diagrams"} {
+		entry := dimensions[name]
+		entry.FindingCodes = uniqueStrings(entry.FindingCodes)
+		count := counts[name]
+		denominator := result.MarkdownFiles
+		if denominator < 1 {
+			denominator = 1
+		}
+		penalty := ((count[0] * 100) + (count[1] * 50)) / denominator
+		entry.Score = max(0, 100-penalty)
+		dimensions[name] = entry
+	}
+	result.Dimensions = dimensions
+}
+
+func dimensionAverage(dimensions map[string]model.DimensionResult) int {
+	if len(dimensions) == 0 {
+		return 100
+	}
+	total := 0
+	for _, dimension := range dimensions {
+		total += dimension.Score
+	}
+	return total / len(dimensions)
+}
+
+func validationDimension(code string) string {
+	switch {
+	case strings.HasPrefix(code, "DOC-NAVIGATION") || strings.Contains(code, "LINK"):
+		return "navigation"
+	case strings.HasPrefix(code, "EVIDENCE-") || strings.HasPrefix(code, "DOC-SOURCE"):
+		return "evidence"
+	case strings.HasPrefix(code, "CATALOG-") || strings.HasPrefix(code, "DOC-REQUIRED-TABLE"):
+		return "catalog integrity"
+	case strings.HasPrefix(code, "GRAPH-"):
+		return "graph integrity"
+	case strings.HasPrefix(code, "MERMAID-"):
+		return "diagrams"
+	case strings.Contains(code, "SECURITY") || strings.HasPrefix(code, "SECRET-"):
+		return "security"
+	case strings.HasPrefix(code, "COVERAGE-"):
+		return "coverage"
+	default:
+		return "structure"
+	}
+}
+
+func uniqueStrings(values []string) []string {
+	set := map[string]bool{}
+	for _, value := range values {
+		set[value] = true
+	}
+	out := make([]string, 0, len(set))
+	for value := range set {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func parseFrontMatter(content string) (map[string]string, []string) {
@@ -256,7 +607,8 @@ func parseFrontMatter(content string) (map[string]string, []string) {
 	current := ""
 	seen := map[string]bool{}
 	for i := 1; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
+		rawLine := lines[i]
+		line := strings.TrimSpace(rawLine)
 		if line == "---" {
 			break
 		}
@@ -266,6 +618,10 @@ func parseFrontMatter(content string) (map[string]string, []string) {
 		}
 		if idx := strings.Index(line, ":"); idx > 0 {
 			key := strings.TrimSpace(line[:idx])
+			indent := len(rawLine) - len(strings.TrimLeft(rawLine, " \t"))
+			if indent > 0 && current != "" && current != "tags" {
+				key = current + "." + key
+			}
 			val := strings.Trim(strings.TrimSpace(line[idx+1:]), "\"'")
 			out[key] = val
 			current = key
@@ -276,6 +632,99 @@ func parseFrontMatter(content string) (map[string]string, []string) {
 		}
 	}
 	return out, keys
+}
+
+func validateSemanticTables(path, content string, requireIdentity, requireEvidence bool) []model.Finding {
+	if !requireIdentity && !requireEvidence {
+		return nil
+	}
+	var findings []model.Finding
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	for i := 0; i+1 < len(lines); i++ {
+		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "|") || !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "|") || !strings.Contains(lines[i+1], "---") {
+			continue
+		}
+		headers := tableCells(lines[i])
+		if len(headers) == 0 {
+			continue
+		}
+		lower := make([]string, len(headers))
+		identityIndex, evidenceIndex := -1, -1
+		for index, header := range headers {
+			lower[index] = strings.ToLower(strings.TrimSpace(header))
+			if identityIndex < 0 && (strings.Contains(lower[index], "id") || lower[index] == "key") {
+				identityIndex = index
+			}
+			if evidenceIndex < 0 && strings.Contains(lower[index], "evidence") {
+				evidenceIndex = index
+			}
+		}
+		relationshipTable := len(headers) >= 3 && strings.Contains(lower[0], "subject") && strings.Contains(lower[1], "relationship") && strings.Contains(lower[2], "object")
+		seen := map[string]bool{}
+		for rowIndex := i + 2; rowIndex < len(lines); rowIndex++ {
+			trimmed := strings.TrimSpace(lines[rowIndex])
+			if !strings.HasPrefix(trimmed, "|") {
+				break
+			}
+			cells := tableCells(trimmed)
+			if len(cells) < len(headers) {
+				continue
+			}
+			if identityIndex >= 0 && requireIdentity {
+				id := strings.TrimSpace(cells[identityIndex])
+				if id == "" || strings.EqualFold(id, "unknown") || strings.EqualFold(id, "not observed") {
+					continue
+				}
+				if seen[id] {
+					findings = append(findings, model.Finding{Code: "CATALOG-DUPLICATE-ID", Severity: "error", Path: path, Message: "duplicate catalog entry ID: " + id})
+				}
+				seen[id] = true
+			}
+			if evidenceIndex >= 0 && requireEvidence {
+				if strings.TrimSpace(cells[evidenceIndex]) == "" && !rowIsUnknown(cells) {
+					findings = append(findings, model.Finding{Code: "EVIDENCE-CATALOG-ROW", Severity: "error", Path: path, Message: "catalog row has no evidence reference"})
+				}
+			}
+			if relationshipTable {
+				relationship := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(cells[1]), " ", "_"))
+				if !controlledRelationship(relationship) {
+					findings = append(findings, model.Finding{Code: "GRAPH-RELATIONSHIP-VOCAB", Severity: "error", Path: path, Message: "unsupported relationship vocabulary: " + relationship})
+				}
+				if requireEvidence && len(cells) < 6 {
+					findings = append(findings, model.Finding{Code: "GRAPH-RELATIONSHIP-EVIDENCE", Severity: "error", Path: path, Message: "relationship row must include evidence, authority, and confidence columns"})
+				}
+			}
+		}
+	}
+	return findings
+}
+
+var controlledRelationshipVocabulary = map[string]bool{
+	"AUTHORIZES": true, "CALLS": true, "CONSUMES": true, "DEPENDS_ON": true, "EXPOSES": true,
+	"EXTENDS": true, "IMPLEMENTS": true, "IMPORTS": true, "LINKS_TO": true, "OWNS": true,
+	"PART_OF": true, "PERSISTS": true, "PRODUCES": true, "REFERENCES": true, "RELATED_TO": true,
+	"VALIDATES": true,
+}
+
+func controlledRelationship(value string) bool { return controlledRelationshipVocabulary[value] }
+
+func tableCells(line string) []string {
+	line = strings.Trim(strings.TrimSpace(line), "|")
+	parts := strings.Split(line, "|")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+func rowIsUnknown(cells []string) bool {
+	for _, cell := range cells {
+		value := strings.ToLower(strings.TrimSpace(cell))
+		if value == "unknown" || value == "not observed" || value == "not applicable" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasHeading(content, heading string) bool {
@@ -390,6 +839,39 @@ func catalogHasDataRow(content, header string) bool {
 	return false
 }
 
+func catalogTableStats(content, header string) (rows, bytes int) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != strings.TrimSpace(header) {
+			continue
+		}
+		seenSeparator := false
+		bytes += len([]byte(line)) + 1
+		for _, candidate := range lines[i+1:] {
+			trimmed := strings.TrimSpace(candidate)
+			if trimmed == "" {
+				if seenSeparator {
+					break
+				}
+				continue
+			}
+			if !strings.HasPrefix(trimmed, "|") {
+				break
+			}
+			bytes += len([]byte(candidate)) + 1
+			if !seenSeparator {
+				seenSeparator = strings.Contains(trimmed, "---")
+				continue
+			}
+			if strings.Count(trimmed, "|") >= 2 {
+				rows++
+			}
+		}
+		return rows, bytes
+	}
+	return 0, 0
+}
+
 func firstMermaidToken(block string) string {
 	for _, line := range strings.Split(strings.TrimSpace(block), "\n") {
 		line = strings.TrimSpace(line)
@@ -435,12 +917,80 @@ func basicMermaidCheck(block string) error {
 	return nil
 }
 
+type mermaidRenderResult struct {
+	job mermaidRenderJob
+	err error
+}
+
+type boundedMermaidOutput struct {
+	data []byte
+}
+
+func (b *boundedMermaidOutput) Write(p []byte) (int, error) {
+	const maxBytes = 64 * 1024
+	if len(p) >= maxBytes {
+		b.data = append(b.data[:0], p[len(p)-maxBytes:]...)
+		return len(p), nil
+	}
+	if len(b.data)+len(p) > maxBytes {
+		remove := len(b.data) + len(p) - maxBytes
+		b.data = append(b.data[:0], b.data[remove:]...)
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
+}
+
+func (b *boundedMermaidOutput) String() string { return string(b.data) }
+
+func (v Validator) renderMermaidJobs(ctx context.Context, targetID string, jobs []mermaidRenderJob) []mermaidRenderResult {
+	if len(jobs) == 0 {
+		return nil
+	}
+	workers := v.Config.Mermaid.MaxWorkers
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+	results := make([]mermaidRenderResult, len(jobs))
+	jobCh := make(chan int)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobCh {
+				job := jobs[index]
+				results[index] = mermaidRenderResult{job: job, err: v.renderMermaid(ctx, targetID, job.rel, job.index, job.total, job.content)}
+			}
+		}()
+	}
+	for index := range jobs {
+		select {
+		case jobCh <- index:
+		case <-ctx.Done():
+			results[index] = mermaidRenderResult{job: jobs[index], err: ctx.Err()}
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	return results
+}
+
 func (v Validator) renderMermaid(ctx context.Context, targetID, rel string, index, total int, content string) error {
 	if v.Config.Mermaid.Command == "" {
 		return fmt.Errorf("mermaid.command is empty")
 	}
 	if _, err := exec.LookPath(v.Config.Mermaid.Command); err != nil {
 		return err
+	}
+	cachePath := v.mermaidCachePath(content)
+	if cachePath != "" {
+		if stat, err := os.Stat(cachePath); err == nil && stat.Size() > 0 {
+			validationProgress(targetID, "Mermaid cache hit | file=%s | diagram=%d/%d", rel, index+1, total)
+			return nil
+		}
 	}
 	tmpDir, err := os.MkdirTemp("", "wikiforge-mermaid-*")
 	if err != nil {
@@ -468,7 +1018,7 @@ func (v Validator) renderMermaid(ctx context.Context, targetID, rel string, inde
 	renderCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(renderCtx, v.Config.Mermaid.Command, args...)
-	var stderr bytes.Buffer
+	var stderr boundedMermaidOutput
 	cmd.Stderr = &stderr
 
 	started := time.Now()
@@ -496,8 +1046,35 @@ func (v Validator) renderMermaid(ctx context.Context, targetID, rel string, inde
 	if stat, err := os.Stat(output); err != nil || stat.Size() == 0 {
 		return fmt.Errorf("renderer produced no output")
 	}
+	if cachePath != "" {
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+			return fmt.Errorf("create Mermaid cache: %w", err)
+		}
+		data, err := os.ReadFile(output)
+		if err != nil {
+			return fmt.Errorf("read Mermaid output for cache: %w", err)
+		}
+		tmp := cachePath + fmt.Sprintf(".%d.tmp", time.Now().UnixNano())
+		if err := os.WriteFile(tmp, data, 0o644); err != nil {
+			return fmt.Errorf("write Mermaid cache: %w", err)
+		}
+		if err := os.Rename(tmp, cachePath); err != nil {
+			_ = os.Remove(tmp)
+			if _, statErr := os.Stat(cachePath); statErr != nil {
+				return fmt.Errorf("publish Mermaid cache: %w", err)
+			}
+		}
+	}
 	validationProgress(targetID, "Mermaid render completed | file=%s | diagram=%d/%d | elapsed=%s", rel, index+1, total, compactValidationDuration(time.Since(started)))
 	return nil
+}
+
+func (v Validator) mermaidCachePath(content string) string {
+	if strings.TrimSpace(v.Config.Mermaid.CacheDirectory) == "" {
+		return ""
+	}
+	key := sha256.Sum256([]byte(v.Config.Mermaid.Command + "\x00" + strings.Join(v.Config.Mermaid.Args, "\x00") + "\x00" + content))
+	return filepath.Join(v.Config.Mermaid.CacheDirectory, hex.EncodeToString(key[:])+".svg")
 }
 
 func rendererArgs(template []string, input, output string) []string {

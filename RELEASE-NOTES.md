@@ -32,9 +32,9 @@ The temporary prompt is still removed after success, failure, timeout, or cancel
 
 ## Semantic success detection
 
-An OpenWiki process can exit with code `0` without executing the requested phase. Responses such as “Could you clarify?”, “Where is the file?”, or “What would you like me to do?” are now classified as semantic failures.
+An OpenWiki process can exit with code `0` without executing the requested operation. Responses such as “Could you clarify?”, “Where is the file?”, or “What would you like me to do?” are now classified as semantic failures.
 
-WikiForge no longer marks those phases completed. The response is retried according to the configured process retry policy and is reported as a failure if all attempts return clarification instead of performing the task.
+WikiForge no longer marks those operations completed. The response is retried according to the configured process retry policy and is reported as a failure if all attempts return clarification instead of performing the task.
 
 ## Validation and Mermaid progress
 
@@ -54,6 +54,6 @@ This makes the period after `repair-N OpenWiki process completed` observable ins
 
 Prompt and Mermaid paths remain absolute and normalized for Windows, macOS, and Linux, including drive paths, UNC paths, spaces, Unicode, mixed separators, symlinks, and Windows junctions. `wikiforge doctor` continues to run prompt-transport preflight checks.
 
-## Compatibility
+## Configuration and pipeline
 
-Configuration version remains `2`. Canonical documentation contracts and phase IDs are unchanged. Existing checkpoints remain readable, but phases previously marked completed after clarification-only responses must be invalidated or regenerated because those completion records are false positives from the older runner.
+Only configuration version `3` is supported. The adaptive planner is the only documentation pipeline: page applicability, hierarchy, catalog sharding, evidence scope, and validation contracts come from the current plan. Generate a fresh run from a v3 configuration.

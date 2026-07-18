@@ -1,4 +1,4 @@
-version: 2
+version: 3
 workspace: .
 
 openwiki:
@@ -15,23 +15,52 @@ openwiki:
     OPENWIKI_PROVIDER_RETRY_ATTEMPTS: "3"
 
 execution:
-  # Different repositories may run concurrently. Components sharing one
-  # repository are automatically serialized, which is safe for monorepos.
+  # Scoped components sharing one repository use isolated staging worktrees.
   parallelComponents: 2
   maxProcessRetries: 2
   maxRepairRounds: 2
   continueOnComponentFailure: true
+  isolateSameRepository: true
 
 documentation:
   language: English
+  views:
+    - system
+    - domain
+    - component
+    - flow
+    - catalog
+    - platform
+    - engineering
+    - operations
+  catalogs:
+    shardBy:
+      - domain
+    maximumRowsPerPage: 150
+    maximumBytesPerPage: 524288
+  evidence:
+    include:
+      - src/**
+      - config/**
+      - deploy/**
+    exclude:
+      - vendor/**
+      - generated/**
+      - "**/*.bin"
+    cacheDirectory: ./.wikiforge/cache/evidence
+    maxFileBytes: 4194304
+  frontMatterPolicy: namespaced
+  requireVerifiedEvidence: true
+  requireCatalogIdentity: true
+  requireRelationshipEvidence: true
   minimumQualityScore: 85
-  # 0 = use the selected component profile's built-in contract.
+  # 0 = use planner defaults.
   minimumPages: 0
   requireFrontMatter: true
   requireSourceReferences: true
   validateSourcePaths: true
   requireMermaid: true
-  # 0 = use the selected component profile's built-in minimum.
+  # 0 = use planner defaults.
   minimumMermaidBlocks: 0
   allowedDiagramTypes:
     - flowchart
@@ -68,13 +97,16 @@ components:
     repository: ./repositories/order-service
     enabled: false
     group: commerce
+    owners: [commerce-team]
     tags: [order, deployable]
+    capabilities: [order-management]
+    packs: [telemetry]
     dependsOn: [shared-contracts]
 
   # Entire monolith repository.
-  - id: legacy-commerce
+  - id: commerce-monolith
     type: monolith
-    repository: ./repositories/legacy-commerce
+    repository: ./repositories/commerce-monolith
     enabled: false
 
   # Modular monolith with module-aware documentation.
@@ -82,6 +114,7 @@ components:
     type: modular-monolith
     repository: ./repositories/commerce-core
     enabled: false
+    capabilities: [order-management, pricing, fulfilment]
 
   # Multiple scoped components inside one monorepo.
   - id: catalog-app
@@ -113,6 +146,24 @@ components:
     type: configuration
     repository: ./repositories/platform-configuration
     enabled: false
+
+documentationUnits:
+  - id: order-management
+    component: commerce-core
+    kind: domain
+    sourceRoots:
+      - modules/order
+      - workflows/order
+    output: domains/order-management
+
+  - id: submit-order
+    component: commerce-core
+    kind: flow
+    sourceRoots:
+      - workflows/order
+    relatedUnits:
+      - order-management
+    output: flows/submit-order
 
 system:
   enabled: true

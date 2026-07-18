@@ -15,11 +15,50 @@ type Component struct {
 }
 
 type PageContract struct {
-	Path                string
-	Objective           string
-	RequiredHeadings    []string
-	RequiredDiagram     string
-	RequiredTableHeader string
+	Path                string            `json:"path"`
+	Kind                PageKind          `json:"kind"`
+	PathTemplate        string            `json:"pathTemplate,omitempty"`
+	IndexPathTemplate   string            `json:"indexPathTemplate,omitempty"`
+	Applicability       ApplicabilityRule `json:"applicability,omitempty"`
+	ShardDimensions     []ShardDimension  `json:"shardDimensions,omitempty"`
+	MaximumRowsPerShard int               `json:"maximumRowsPerShard,omitempty"`
+	MaximumBytes        int               `json:"maximumBytes,omitempty"`
+	ShardKey            string            `json:"shardKey,omitempty"`
+	OwnershipPartition  bool              `json:"ownershipPartition,omitempty"`
+	Objective           string            `json:"objective,omitempty"`
+	RequiredHeadings    []string          `json:"requiredHeadings,omitempty"`
+	RequiredDiagram     string            `json:"requiredDiagram,omitempty"`
+	RequiredTableHeader string            `json:"requiredTableHeader,omitempty"`
+}
+
+type PageKind string
+
+const (
+	PageSingle     PageKind = "single"
+	PageIndex      PageKind = "index"
+	PageCollection PageKind = "collection"
+	PageShard      PageKind = "shard"
+)
+
+type ShardDimension string
+
+const (
+	ShardDomain      ShardDimension = "domain"
+	ShardSubdomain   ShardDimension = "subdomain"
+	ShardBoundedCtx  ShardDimension = "bounded-context"
+	ShardComponent   ShardDimension = "component"
+	ShardOwner       ShardDimension = "owner"
+	ShardRepository  ShardDimension = "repository"
+	ShardRuntime     ShardDimension = "runtime"
+	ShardTransport   ShardDimension = "transport"
+	ShardDataStore   ShardDimension = "data-store"
+	ShardCriticality ShardDimension = "criticality"
+)
+
+type ApplicabilityRule struct {
+	Views        []string `json:"views,omitempty"`
+	Packs        []string `json:"packs,omitempty"`
+	MinimumUnits int      `json:"minimumUnits,omitempty"`
 }
 
 type Phase struct {
@@ -43,13 +82,19 @@ type Finding struct {
 }
 
 type ValidationResult struct {
-	Root          string    `json:"root"`
-	Profile       string    `json:"profile,omitempty"`
-	Score         int       `json:"score"`
-	Accepted      bool      `json:"accepted"`
-	MarkdownFiles int       `json:"markdownFiles"`
-	MermaidBlocks int       `json:"mermaidBlocks"`
-	Findings      []Finding `json:"findings"`
+	Root          string                     `json:"root"`
+	Profile       string                     `json:"profile,omitempty"`
+	Score         int                        `json:"score"`
+	Accepted      bool                       `json:"accepted"`
+	MarkdownFiles int                        `json:"markdownFiles"`
+	MermaidBlocks int                        `json:"mermaidBlocks"`
+	Findings      []Finding                  `json:"findings"`
+	Dimensions    map[string]DimensionResult `json:"dimensions,omitempty"`
+}
+
+type DimensionResult struct {
+	Score        int      `json:"score"`
+	FindingCodes []string `json:"findingCodes,omitempty"`
 }
 
 type PhaseStatus struct {
@@ -61,11 +106,34 @@ type PhaseStatus struct {
 }
 
 type TargetState struct {
-	GitHead    string                 `json:"gitHead,omitempty"`
-	DocsHash   string                 `json:"docsHash,omitempty"`
-	SourceHash string                 `json:"sourceHash,omitempty"`
-	Status     string                 `json:"status"`
-	Phases     map[string]PhaseStatus `json:"phases"`
+	GitHead           string                 `json:"gitHead,omitempty"`
+	DocsHash          string                 `json:"docsHash,omitempty"`
+	SourceHash        string                 `json:"sourceHash,omitempty"`
+	PlanHash          string                 `json:"planHash,omitempty"`
+	EvidenceRevision  string                 `json:"evidenceRevision,omitempty"`
+	EvidenceIndexPath string                 `json:"evidenceIndexPath,omitempty"`
+	ImpactIndexPath   string                 `json:"impactIndexPath,omitempty"`
+	CoveragePath      string                 `json:"coveragePath,omitempty"`
+	SnapshotHash      string                 `json:"snapshotHash,omitempty"`
+	PageHashes        map[string]string      `json:"pageHashes,omitempty"`
+	ShardHashes       map[string]string      `json:"shardHashes,omitempty"`
+	Status            string                 `json:"status"`
+	Phases            map[string]PhaseStatus `json:"phases"`
+}
+
+type RunMetrics struct {
+	StartedAt           time.Time `json:"startedAt"`
+	CompletedAt         time.Time `json:"completedAt,omitempty"`
+	DurationMillis      int64     `json:"durationMillis,omitempty"`
+	OpenWikiCalls       int       `json:"openWikiCalls"`
+	PagesGenerated      int       `json:"pagesGenerated"`
+	PagesUpdated        int       `json:"pagesUpdated"`
+	EvidenceFiles       int       `json:"evidenceFiles"`
+	EvidenceCacheHits   int       `json:"evidenceCacheHits"`
+	EvidenceCacheMisses int       `json:"evidenceCacheMisses"`
+	InputTokens         int64     `json:"inputTokens,omitempty"`
+	OutputTokens        int64     `json:"outputTokens,omitempty"`
+	UsageReported       bool      `json:"usageReported"`
 }
 
 type RunState struct {
@@ -75,7 +143,5 @@ type RunState struct {
 	StartedAt  time.Time              `json:"startedAt"`
 	UpdatedAt  time.Time              `json:"updatedAt"`
 	Components map[string]TargetState `json:"components"`
-	// Services is retained to migrate v1 state files.
-	Services map[string]TargetState `json:"services,omitempty"`
-	System   TargetState            `json:"system"`
+	System     TargetState            `json:"system"`
 }

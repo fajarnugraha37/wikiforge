@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/wikiforge/internal/model"
+	"github.com/fajarnugraha37/wikiforge/internal/model"
 )
 
 type Store struct {

@@ -5,107 +5,8 @@ import (
 	"io/fs"
 	"strings"
 
-	"github.com/example/wikiforge/internal/assets"
-	"github.com/example/wikiforge/internal/config"
-	"github.com/example/wikiforge/internal/model"
+	"github.com/fajarnugraha37/wikiforge/internal/assets"
 )
-
-var SystemPhases = buildSystemPhases()
-
-func buildSystemPhases() []model.Phase {
-	phases := []model.Phase{
-		{ID: "W00", Name: "Bootstrap system OpenWiki", PromptAsset: "prompts/system/00-initialize.md", Initialize: true},
-		{ID: "W05", Name: "System quickstart", PromptAsset: "prompts/system/05-quickstart.md", OutputFile: "quickstart.md", RequiredDiagram: "flowchart", RequiredHeadings: []string{"System at a Glance", "Component Categories", "Critical Journeys", "Reading Paths", "High-Risk Knowledge Gaps", "Documentation Map", "Source References"}},
-		{ID: "W10", Name: "System landscape", PromptAsset: "prompts/system/10-system-overview.md", OutputFile: "system/landscape.md", RequiredDiagram: "flowchart", RequiredHeadings: []string{"System Purpose and Scope", "Business and Technical Capabilities", "Actors and Boundaries", "Component Categories", "Critical Journeys", "Runtime and Deployment Shape", "Repository and Ownership Evidence", "Knowledge Gaps", "Source References"}},
-		{ID: "W20", Name: "Component map", PromptAsset: "prompts/system/20-component-map.md", OutputFile: "system/component-map.md", RequiredDiagram: "flowchart", RequiredHeadings: []string{"Component Catalog", "Deployable Components", "Modular Applications", "Libraries and Frameworks", "Infrastructure and Configuration Components", "Contract and Schema Components", "Dependency Relationships", "External Systems", "Shared Foundations", "Dependency Risks", "Contradictions", "Knowledge Gaps", "Source References"}},
-		{ID: "W30", Name: "Cross-component flows", PromptAsset: "prompts/system/30-cross-component-flows.md", OutputFile: "system/cross-component-flows.md", RequiredDiagram: "sequenceDiagram", RequiredHeadings: []string{"Journey Inventory", "Primary Journey", "Alternate Paths", "Failure and Compensation Paths", "Correlation and Identity Propagation", "Application and Infrastructure Boundaries", "Transaction and Consistency Boundaries", "Operational Checkpoints", "Change Impact", "Knowledge Gaps", "Source References"}},
-		{ID: "W40", Name: "Data, events, and contracts", PromptAsset: "prompts/system/40-data-events-contracts.md", OutputFile: "system/data-events-contracts.md", RequiredDiagram: "flowchart", RequiredHeadings: []string{"System-of-Record Map", "Data Ownership", "Shared Identifiers", "Data Movement", "Event and Message Catalog", "API and Contract Catalog", "Ordering and Delivery Boundaries", "Cross-Component Consistency", "Schema and Contract Evolution", "Replay and Reconciliation Impact", "Knowledge Gaps", "Source References"}},
-		{ID: "W45", Name: "Infrastructure and deployment", PromptAsset: "prompts/system/45-infrastructure-deployment.md", OutputFile: "system/infrastructure-deployment.md", RequiredDiagram: "flowchart", RequiredHeadings: []string{"Infrastructure Component Inventory", "Environment Model", "Runtime Topology", "Network and Trust Boundaries", "Deployment and Promotion", "Shared Configuration", "Stateful Infrastructure", "Operational Dependencies", "Drift and Configuration Risks", "Knowledge Gaps", "Source References"}},
-		{ID: "W50", Name: "Failure, security, and operations", PromptAsset: "prompts/system/50-failure-and-security.md", OutputFile: "system/failure-security-operations.md", RequiredDiagram: "flowchart", RequiredHeadings: []string{"Trust Boundaries", "Identity and Authorization Flow", "Critical Dependencies", "Failure Propagation", "Degraded Modes", "Detection and Observability", "Recovery Dependencies", "Operational Ownership Evidence", "Systemic Risks", "Dangerous Gaps", "Knowledge Gaps", "Source References"}},
-	}
-	batches := batchPageContracts(SystemSupplementalPages, 4)
-	for i, batch := range batches {
-		phases = append(phases, model.Phase{
-			ID:            fmt.Sprintf("WS%02d", i+1),
-			Name:          fmt.Sprintf("System specialized catalogs %d/%d", i+1, len(batches)),
-			PromptAsset:   "prompts/system/55-specialized-catalogs.md",
-			Objective:     "Generate a batch of system-level specialized catalogs from component documentation.",
-			PageContracts: append([]model.PageContract(nil), batch...),
-		})
-	}
-	phases = append(phases,
-		model.Phase{ID: "WO60", Name: "Onboarding and change", PromptAsset: "prompts/system/60-onboarding-change.md", OutputFile: "system/onboarding-change-guide.md", RequiredDiagram: "flowchart", RequiredHeadings: []string{"Recommended Reading Order", "Repository and Component Map", "How to Trace a Requirement", "How to Trace a Runtime Failure", "How to Change an Application Contract", "How to Change a Library or Framework", "How to Change Infrastructure or Configuration", "How to Change an Event, Message, or Schema", "How to Add or Remove a Component", "Cross-Component Test Strategy", "Release and Rollback Evidence", "Review Checklist", "Knowledge Gaps", "Source References"}},
-		model.Phase{ID: "WC90", Name: "Consolidate system wiki", PromptAsset: "prompts/system/90-consolidate.md", OutputFile: "knowledge/relationships.md", RequiredHeadings: []string{"Entity Index", "Relationship Table", "Capability-to-Component Traceability", "Component-to-Contract Traceability", "Application-to-Infrastructure Traceability", "Data and Event Traceability", "Failure and Recovery Traceability", "Canonical Terminology", "Contradictions", "Knowledge Gaps", "Source References"}},
-	)
-	return phases
-}
-
-func RenderComponentPhase(phase model.Phase, profile Profile, component config.ComponentConfig, language string, values map[string]string) (string, error) {
-	supplemental := SupplementalPages(profile.ID)
-	if len(phase.PageContracts) > 0 {
-		supplemental = phase.PageContracts
-	}
-	common := map[string]string{
-		"PROFILE_ID":             profile.ID,
-		"PROFILE_NAME":           profile.DisplayName,
-		"PROFILE_DESCRIPTION":    profile.Description,
-		"TARGET_NOUN":            profile.TargetNoun,
-		"COMPONENT_TYPE":         component.Type,
-		"REPOSITORY":             component.Repository,
-		"SCOPE":                  displayScope(component.Scope),
-		"CANONICAL_FILES":        CanonicalFilesText(profile),
-		"OUTPUT_FILE":            phase.OutputFile,
-		"OBJECTIVE":              phase.Objective,
-		"REQUIRED_HEADINGS":      headingsText(phase.RequiredHeadings),
-		"DIAGRAM_CONTRACT":       diagramContract(phase.RequiredDiagram),
-		"GUIDANCE":               profileGuidance(profile.ID, component.Type),
-		"SUPPLEMENTAL_CONTRACTS": supplementalContractsText(supplemental),
-	}
-	for k, v := range values {
-		common[k] = v
-	}
-	return Render(phase.PromptAsset, language, component.ID, common)
-}
-
-func RenderSystemPhase(phase model.Phase, language, targetID string) (string, error) {
-	supplemental := SystemSupplementalPages
-	if len(phase.PageContracts) > 0 {
-		supplemental = phase.PageContracts
-	}
-	return Render(phase.PromptAsset, language, targetID, map[string]string{
-		"SYSTEM_CANONICAL_FILES":        systemCanonicalFilesText(),
-		"SYSTEM_SUPPLEMENTAL_CONTRACTS": supplementalContractsText(supplemental),
-	})
-}
-
-func systemCanonicalFilesText() string {
-	var b strings.Builder
-	for _, path := range ExpectedSystemFiles() {
-		fmt.Fprintf(&b, "- openwiki/%s\n", path)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func RenderComponentUpdate(profile Profile, component config.ComponentConfig, language string) (string, error) {
-	return RenderComponentPhase(model.Phase{PromptAsset: "prompts/component/update.md"}, profile, component, language, nil)
-}
-
-func RenderSystemUpdate(language, targetID string) (string, error) {
-	return RenderSystemPhase(model.Phase{PromptAsset: "prompts/system/update.md"}, language, targetID)
-}
-
-func RenderInstructions(profile Profile, component config.ComponentConfig, language string) (string, error) {
-	return RenderTemplateValues("templates/instructions.md", language, component.ID, map[string]string{
-		"PROFILE_ID":          profile.ID,
-		"PROFILE_NAME":        profile.DisplayName,
-		"PROFILE_DESCRIPTION": profile.Description,
-		"COMPONENT_TYPE":      component.Type,
-		"REPOSITORY":          component.Repository,
-		"SCOPE":               displayScope(component.Scope),
-		"CANONICAL_FILES":     CanonicalFilesText(profile),
-		"GUIDANCE":            profileGuidance(profile.ID, component.Type),
-	})
-}
 
 func Render(assetPath, language, targetID string, values map[string]string) (string, error) {
 	baseBytes, err := fs.ReadFile(assets.FS, "prompts/common/base.md")
@@ -190,8 +91,4 @@ func profileGuidance(profile, componentType string) string {
 	default:
 		return "Use repository evidence to describe its actual purpose and outputs without forcing application-specific concepts when they do not apply."
 	}
-}
-
-func ExpectedSystemFiles() []string {
-	return sortedContractPaths(SystemPageContracts())
 }

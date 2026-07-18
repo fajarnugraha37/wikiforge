@@ -8,18 +8,18 @@ resource: /cmd/wikiforge/main.go
 
 # WikiForge Documentation
 
-WikiForge is a **cross-platform Go CLI** (v1.2.3) that orchestrates [OpenWiki](https://github.com/fajarnugraha37/OpenWiki) in controlled phases to generate validated documentation for software repositories. It supports multiple documentation profiles, monorepo scoping, cross-repository parallelism, validation and repair, whole-system aggregation, and knowledge-graph export.
+WikiForge is a **cross-platform Go CLI** that orchestrates [OpenWiki](https://github.com/fajarnugraha37/OpenWiki) to generate adaptive, evidence-backed documentation for software repositories. It uses a configurable version 3 schema, supports monorepo scoping, cross-repository parallelism, evidence-driven validation and repair, whole-system aggregation, and knowledge-graph export.
 
 **Key capabilities:**
 
-- **Profile-driven generation** — 7 documentation profiles (application, modular-application, reusable, infrastructure, configuration, contracts, generic) each with phase-specific contracts, required sections, and diagram types.
-- **Phased orchestration** — Each component progresses through up to 10+ phases (init → overview → architecture → domain → interfaces → data → security → development → specialized catalogs → consolidate), with each phase owning one canonical page.
-- **Monorepo support** — Multiple scoped components in one repository with automatic serialization to avoid competing OpenWiki writes.
-- **Validation and repair** — Validates front matter, required sections, Mermaid diagrams (including rendering), source references, and relative links. Runs targeted repair rounds using validator findings.
-- **Whole-system aggregation** — Combines component wikis into a system-level wiki with cross-component documentation and relationship tables.
+- **Adaptive hierarchical documentation** — Pages are planned from component type, capability packs, discovered source roots, explicit documentation units, and configured views (system, domain, component, flow, catalog, platform, engineering, operations).
+- **Documentation units** — Separate business/domain/flow ownership from deployable repository boundaries.
+- **Evidence index and surgical updates** — Git-aware evidence index tracks file identity, changed paths, and documentation dependencies. Update mode only regenerates affected pages.
+- **Validation and repair** — Semantic validation for evidence resolution, stable catalog IDs, relationship vocabulary, navigation hierarchy, Mermaid diagrams, and security findings. Runs targeted repair rounds.
+- **Whole-system aggregation** — Combines component wikis into a system-level wiki with content-addressed snapshots that reuse unchanged component documentation.
 - **Resume capability** — Persistent state store enables checkpoint-based resume after Ctrl+C or failure.
-- **Knowledge graph export** — JSONL export of document nodes and relationship edges.
-- **Run reporting** — JSON reports and Markdown summaries per run.
+- **Knowledge graph export** — Canonical JSONL export with typed relationships and evidence edges.
+- **Run reporting** — JSON reports and Markdown summaries per run, plus runtime/token metrics when reported by the provider.
 
 ## Quick start
 
@@ -29,13 +29,13 @@ Download from [GitHub Releases](https://github.com/fajarnugraha37/wikiforge/rele
 
 **Windows:**
 ```powershell
-Expand-Archive .\wikiforge-1.2.3-windows-amd64.zip
-cd .\wikiforge-1.2.3-windows-amd64
+Expand-Archive .\wikiforge-*-windows-amd64.zip
+cd .\wikiforge-*-windows-amd64
 ```
 
 **Linux/macOS:**
 ```bash
-unzip wikiforge-1.2.3-linux-amd64.zip
+unzip wikiforge-*-linux-amd64.zip
 cd linux-amd64
 ```
 
@@ -45,7 +45,7 @@ cd linux-amd64
 ./wikiforge init
 ```
 
-Edit `wikiforge.yaml`, add enabled components with correct types. A documentation profile is selected automatically from the type.
+Edit `wikiforge.yaml`, add enabled components with correct types. A documentation profile is selected automatically from the type. Optionally add explicit documentation units and enable evidence caching.
 
 ### 3. Configure provider credentials
 
@@ -62,10 +62,11 @@ export OPENWIKI_MODEL_ID=cheap-code-model
 ./wikiforge doctor
 ```
 
-### 5. Preview the phase plan
+### 5. Preview the adaptive plan
 
 ```bash
-./wikiforge plan
+./wikiforge discover
+./wikiforge plan --explain
 ```
 
 ### 6. Generate all wikis
@@ -77,7 +78,7 @@ export OPENWIKI_MODEL_ID=cheap-code-model
 Generate a single component:
 
 ```bash
-./wikiforge generate --component shared-runtime --skip-system
+./wikiforge generate --component order-service --skip-system
 ```
 
 ### 7. Incremental update
@@ -86,11 +87,12 @@ Generate a single component:
 ./wikiforge update
 ```
 
-### 8. Validate existing documentation
+### 8. Validate and inspect artifacts
 
 ```bash
-./wikiforge validate --component order-service
-./wikiforge validate --system
+./wikiforge validate --strict
+./wikiforge coverage
+./wikiforge impact
 ```
 
 ### 9. Export knowledge graph
@@ -115,13 +117,16 @@ Generate a single component:
 ## Concepts at a glance
 
 - **Component** — An independently documented repository scope (may be a whole repo or a monorepo subdirectory).
-- **Profile** — A documentation contract with required phases, pages, sections, and diagram types. Seven profiles exist: `application`, `modular-application`, `reusable`, `infrastructure`, `configuration`, `contracts`, `generic`.
-- **Phase** — A single OpenWiki invocation that owns one canonical Markdown page with required sections and diagram.
-- **Canonical pages** — Profile-specific Markdown files with enforced sections, front matter, and diagram contracts.
-- **Specialized catalogs** — Additional optional pages with exact table-header contracts (e.g., endpoint catalogs, job catalogs, dependency matrices).
-- **Whole-system wiki** — Aggregated documentation combining component wikis with cross-component relationship pages.
-- **Knowledge graph** — JSONL export of document-to-document links and relationship tables.
-- **Prompt bridge** — WikiForge stores large phase prompts in temporary files and passes a single-line JSON reference to OpenWiki, avoiding command-line length limits.
+- **Profile** — Identity metadata classifying the component type (application, modular-application, reusable, infrastructure, configuration, contracts, generic). Profiles guide evidence selection and writing tone but do not prescribe fixed page sets.
+- **Documentation view** — One of: system, domain, component, flow, catalog, platform, engineering, operations. Views organize pages by perspective.
+- **Documentation unit** — A separately planned documentation scope owned by a domain, flow, capability, or team. May cross repository boundaries.
+- **Documentation pack** — A capability pack (e.g., `api`, `messaging`, `cache`, `jobs`) that enables conditional catalog collections and concern pages.
+- **Page kind** — `single` (leaf page), `index` (navigation hub), `collection` (catalog collection with table contracts), or `shard` (partitioned catalog page).
+- **Adaptive planner** — Discovers candidate documentation units from the repository, selects views and packs based on component configuration, and produces a page plan executed by the orchestrator.
+- **Evidence index** — Git-aware file index with tracked identity, content hashes, and change detection. Enables surgical update mode (only regenerates affected pages).
+- **Whole-system wiki** — Aggregated documentation combining component wikis with cross-component relationship pages using content-addressed snapshots.
+- **Knowledge graph** — Canonical JSONL export of document nodes and relationship edges with typed relationships and evidence sources.
+- **Prompt bridge** — WikiForge stores large phase prompts in temporary files and passes a single-line JSON virtual path reference (`/openwiki/.wikiforge-prompt-*.md`) to OpenWiki, avoiding command-line length limits.
 - **State store** — Persistent JSON checkpoint at `.wikiforge/state.json` enabling resume after cancellation.
 
 ## Runtime requirements
@@ -137,17 +142,19 @@ Generate a single component:
 
 | Command | Description |
 |---|---|
-| `init` | Generate a default `wikiforge.yaml` configuration |
+| `init` | Generate a default `wikiforge.yaml` configuration (v3) |
 | `doctor` | Validate prerequisites and component scopes |
-| `profiles` | List supported types and documentation profiles |
-| `plan` | Preview the phase plan without executing |
+| `discover` | Run repository discovery and list candidate documentation units |
+| `plan` | Preview the adaptive plan (`--explain` for rationale) |
 | `generate` | Generate all component wikis and the whole-system wiki |
-| `update` | Incremental update of existing documentation |
+| `update` | Incremental update using evidence index (surgical no-op detection) |
 | `resume` | Resume a cancelled or failed generation |
-| `validate` | Validate component or system documentation |
+| `validate` | Validate component or system documentation (`--strict` for higher threshold) |
+| `coverage` | Show evidence coverage for component or system documentation |
+| `impact` | Show change impact analysis from the evidence index |
 | `graph` | Export knowledge graph from documentation |
 | `version` | Print version number |
 
 ## Backlog
 
-No areas deferred. The initial documentation set covers all major domains of WikiForge 1.2.3.
+No areas deferred. The updated documentation set covers the adaptive v3 architecture of WikiForge.

@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/example/wikiforge/internal/cli"
+	"github.com/fajarnugraha37/wikiforge/internal/cli"
 )
 
 func Run(args []string) int {
