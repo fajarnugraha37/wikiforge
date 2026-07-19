@@ -22,7 +22,7 @@ func TestDiscoverIsDeterministicForTheSameRepositoryState(t *testing.T) {
 		{ID: "commerce-core", Type: "modular-monolith", Profile: "modular-application", Repository: repo, Enabled: true},
 	}
 
-	p := Planner{Config: cfg}
+	p := Planner{Config: cfg, Semantic: testSemantic(cfg)}
 	first, err := p.Discover("")
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,10 @@ func TestPlanSelectsAdaptiveViewsByProfile(t *testing.T) {
 		{ID: "iac", Type: "iac", Profile: "infrastructure", Repository: iacRepo, Enabled: true},
 	}
 
-	plan, err := (Planner{Config: cfg}).Plan("", true)
+	for i := range cfg.Components {
+		cfg.Components[i].Packs = []string{"api", "configuration", "data", "domain", "jobs", "messaging", "security", "deployment", "telemetry"}
+	}
+	plan, err := (Planner{Config: cfg, Semantic: testSemantic(cfg)}).Plan("", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,12 +117,52 @@ func TestExplicitDocumentationUnitsArePreserved(t *testing.T) {
 		{ID: "submit-order", Component: "commerce-core", Kind: "flow", SourceRoots: []string{"workflows/order"}, Output: "flows/submit-order"},
 	}
 
-	manifest, err := (Planner{Config: cfg}).Discover("")
+	manifest, err := (Planner{Config: cfg, Semantic: testSemantic(cfg)}).Discover("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !hasUnit(manifest.CandidateDocumentationUnits, "submit-order") {
 		t.Fatal("explicit flow unit missing from discovery manifest")
+	}
+}
+
+func TestExplicitUnitIdentityMergesMatchingInferredFindingWithoutDuplicate(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Workspace = root
+	cfg.Components = []config.ComponentConfig{{ID: "commerce", Type: "modular-monolith", Profile: "modular-application", Repository: root, Enabled: true}}
+	cfg.DocumentationUnits = []config.DocumentationUnitConfig{{ID: "orders-domain", Component: "commerce", Kind: "domain", Domain: "Orders", Output: "domains/orders"}}
+	semantic := model.SemanticDiscovery{
+		SchemaVersion: model.DiscoverySchemaVersion, ComponentID: "commerce", RepositoryID: "commerce", DiscoveryMode: "hybrid",
+		Domains: []model.DomainFinding{{
+			FindingBase: model.FindingBase{ID: "orders", Candidate: model.SemanticCandidate{CandidateKey: "orders-candidate", Name: "Orders", EvidenceIDs: []string{"ev"}}, Status: model.StatusObserved, Confidence: "high", EvidenceIDs: []string{"ev"}},
+			SourceRoots: []string{"modules/orders"},
+		}},
+	}
+	manifest, err := (Planner{Config: cfg, Semantic: map[string]model.SemanticDiscovery{"commerce": semantic}}).Discover("commerce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matches []DocumentationUnit
+	for _, unit := range manifest.CandidateDocumentationUnits {
+		if unit.Kind == UnitDomain && unit.Domain == "Orders" {
+			matches = append(matches, unit)
+		}
+	}
+	if len(matches) != 1 || matches[0].ID != "orders-domain" || len(matches[0].EvidenceIDs) != 1 || len(matches[0].SourceRoots) != 1 {
+		t.Fatalf("explicit and inferred units were not merged: %+v", matches)
+	}
+}
+
+func TestExplicitModePlansWithoutSemanticArtifact(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Workspace = root
+	cfg.Documentation.Discovery.Mode = "explicit"
+	cfg.DocumentationUnits = []config.DocumentationUnitConfig{{ID: "orders", Component: "app", Kind: "domain", Output: "domains/orders"}}
+	cfg.Components = []config.ComponentConfig{{ID: "app", Profile: "application", Repository: root, Enabled: true}}
+	if _, err := (Planner{Config: cfg}).Plan("app", false); err != nil {
+		t.Fatalf("explicit plan unexpectedly requires semantic artifact: %v", err)
 	}
 }
 
@@ -130,12 +173,12 @@ func TestCatalogsCanShardByOwnerAndExposeTypedContracts(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Workspace = root
 	cfg.Documentation.Catalogs.ShardBy = []string{"owner"}
-	cfg.Components = []config.ComponentConfig{{ID: "commerce-core", Type: "modular-monolith", Profile: "modular-application", Repository: repo, Enabled: true}}
+	cfg.Components = []config.ComponentConfig{{ID: "commerce-core", Type: "modular-monolith", Profile: "modular-application", Repository: repo, Enabled: true, Packs: []string{"api"}}}
 	cfg.DocumentationUnits = []config.DocumentationUnitConfig{
 		{ID: "orders", Component: "commerce-core", Kind: "domain", Owners: []string{"orders-team"}, Output: "domains/orders"},
 		{ID: "pricing", Component: "commerce-core", Kind: "domain", Owners: []string{"pricing-team"}, Output: "domains/pricing"},
 	}
-	result, err := (Planner{Config: cfg}).Plan("commerce-core", false)
+	result, err := (Planner{Config: cfg, Semantic: testSemantic(cfg)}).Plan("commerce-core", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +198,20 @@ func TestCatalogsCanShardByOwnerAndExposeTypedContracts(t *testing.T) {
 		}
 	}
 	t.Fatal("owner shard contract not found")
+}
+
+func testSemantic(cfg config.Config) map[string]model.SemanticDiscovery {
+	result := map[string]model.SemanticDiscovery{}
+	for _, component := range cfg.Components {
+		d := model.SemanticDiscovery{SchemaVersion: model.DiscoverySchemaVersion, ComponentID: component.ID, RepositoryID: component.ID, DiscoveryMode: "explicit", Repository: model.RepositoryFinding{Profile: component.Profile, Status: model.StatusExplicitEnabled, Confidence: "high"}}
+		if component.Profile == "modular-application" {
+			for _, name := range []string{"ordering", "pricing"} {
+				d.Domains = append(d.Domains, model.DomainFinding{FindingBase: model.FindingBase{ID: name, Candidate: model.SemanticCandidate{CandidateKey: name, Name: name}, Status: model.StatusObserved, Confidence: "high"}, SourceRoots: []string{"modules/" + name}})
+			}
+		}
+		result[component.ID] = d
+	}
+	return result
 }
 
 func mkdirAll(t *testing.T, path string) {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +13,7 @@ import (
 	"github.com/fajarnugraha37/wikiforge/internal/pathutil"
 )
 
-const CurrentVersion = 3
+const CurrentVersion = 4
 
 type Config struct {
 	Version            int                       `json:"version"`
@@ -45,28 +46,43 @@ type ExecutionConfig struct {
 }
 
 type DocumentationConfig struct {
-	Language                    string         `json:"language"`
-	MinimumQualityScore         int            `json:"minimumQualityScore"`
-	MinimumPages                int            `json:"minimumPages"`
-	RequireFrontMatter          bool           `json:"requireFrontMatter"`
-	RequireSourceReferences     bool           `json:"requireSourceReferences"`
-	ValidateSourcePaths         bool           `json:"validateSourcePaths"`
-	RequireMermaid              bool           `json:"requireMermaid"`
-	MinimumMermaidBlocks        int            `json:"minimumMermaidBlocks"`
-	AllowedDiagramTypes         []string       `json:"allowedDiagramTypes"`
-	Views                       []string       `json:"views"`
-	Catalogs                    CatalogsConfig `json:"catalogs"`
-	Evidence                    EvidenceConfig `json:"evidence"`
-	FrontMatterPolicy           string         `json:"frontMatterPolicy"`
-	RequireVerifiedEvidence     bool           `json:"requireVerifiedEvidence"`
-	RequireCatalogIdentity      bool           `json:"requireCatalogIdentity"`
-	RequireRelationshipEvidence bool           `json:"requireRelationshipEvidence"`
+	Language                    string          `json:"language"`
+	MinimumQualityScore         int             `json:"minimumQualityScore"`
+	MinimumPages                int             `json:"minimumPages"`
+	RequireFrontMatter          bool            `json:"requireFrontMatter"`
+	RequireSourceReferences     bool            `json:"requireSourceReferences"`
+	ValidateSourcePaths         bool            `json:"validateSourcePaths"`
+	RequireMermaid              bool            `json:"requireMermaid"`
+	MinimumMermaidBlocks        int             `json:"minimumMermaidBlocks"`
+	AllowedDiagramTypes         []string        `json:"allowedDiagramTypes"`
+	Views                       []string        `json:"views"`
+	Catalogs                    CatalogsConfig  `json:"catalogs"`
+	Evidence                    EvidenceConfig  `json:"evidence"`
+	FrontMatterPolicy           string          `json:"frontMatterPolicy"`
+	RequireVerifiedEvidence     bool            `json:"requireVerifiedEvidence"`
+	RequireCatalogIdentity      bool            `json:"requireCatalogIdentity"`
+	RequireRelationshipEvidence bool            `json:"requireRelationshipEvidence"`
+	Discovery                   DiscoveryConfig `json:"discovery"`
 }
 
 type CatalogsConfig struct {
-	ShardBy             []string `json:"shardBy"`
-	MaximumRowsPerPage  int      `json:"maximumRowsPerPage"`
-	MaximumBytesPerPage int      `json:"maximumBytesPerPage"`
+	ShardBy []string `json:"shardBy"`
+}
+
+type DiscoveryConfig struct {
+	Mode       string         `json:"mode"`
+	Required   bool           `json:"required"`
+	ReuseCache bool           `json:"reuseCache"`
+	OnConflict ConflictConfig `json:"onConflict"`
+}
+
+type ConflictConfig struct {
+	DomainIdentity  string `json:"domainIdentity"`
+	SourceOwnership string `json:"sourceOwnership"`
+	ModuleRole      string `json:"moduleRole"`
+	Ownership       string `json:"ownership"`
+	Criticality     string `json:"criticality"`
+	Relationships   string `json:"relationships"`
 }
 
 type EvidenceConfig struct {
@@ -117,7 +133,6 @@ type DocumentationUnitConfig struct {
 	View           string   `json:"view"`
 	EvidenceRoots  []string `json:"evidenceRoots"`
 	ShardBy        []string `json:"shardBy"`
-	MaximumRows    int      `json:"maximumRows"`
 }
 
 type SystemConfig struct {
@@ -164,10 +179,9 @@ func Defaults() Config {
 			RequireVerifiedEvidence:     true,
 			RequireCatalogIdentity:      true,
 			RequireRelationshipEvidence: true,
-			Catalogs: CatalogsConfig{
-				MaximumRowsPerPage:  150,
-				MaximumBytesPerPage: 512 * 1024,
-			},
+			Discovery: DiscoveryConfig{Mode: "hybrid", Required: true, ReuseCache: true, OnConflict: ConflictConfig{
+				DomainIdentity: "fail", SourceOwnership: "fail", ModuleRole: "retain", Ownership: "retain", Criticality: "retain", Relationships: "retain",
+			}},
 			Evidence: EvidenceConfig{
 				MaxFileBytes: 4 * 1024 * 1024,
 			},
@@ -204,7 +218,16 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := json.Unmarshal(jb, &cfg); err != nil {
+	root, ok := raw.(map[string]any)
+	if !ok {
+		return cfg, errors.New("configuration root must be an object")
+	}
+	if _, ok := root["version"]; !ok {
+		return cfg, errors.New("version is required and must be 4")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(jb))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("decode config: %w", err)
 	}
 	base, err := filepath.Abs(filepath.Dir(path))
@@ -341,9 +364,6 @@ func normalizeDocumentationUnit(unit *DocumentationUnitConfig) error {
 
 func applyDefaults(c *Config) {
 	d := Defaults()
-	if c.Version == 0 {
-		c.Version = CurrentVersion
-	}
 	if c.OpenWiki.Command == "" {
 		c.OpenWiki.Command = d.OpenWiki.Command
 	}
@@ -386,11 +406,8 @@ func applyDefaults(c *Config) {
 	if c.Documentation.Evidence.CacheDirectory == "" {
 		c.Documentation.Evidence.CacheDirectory = filepath.Join(c.Workspace, ".wikiforge", "cache", "evidence")
 	}
-	if c.Documentation.Catalogs.MaximumRowsPerPage <= 0 {
-		c.Documentation.Catalogs.MaximumRowsPerPage = d.Documentation.Catalogs.MaximumRowsPerPage
-	}
-	if c.Documentation.Catalogs.MaximumBytesPerPage <= 0 {
-		c.Documentation.Catalogs.MaximumBytesPerPage = d.Documentation.Catalogs.MaximumBytesPerPage
+	if c.Documentation.Discovery.Mode == "" {
+		c.Documentation.Discovery = d.Documentation.Discovery
 	}
 	if c.Mermaid.Mode == "" {
 		c.Mermaid.Mode = d.Mermaid.Mode
@@ -424,6 +441,34 @@ func Validate(c Config) error {
 	}
 	if c.OpenWiki.Command == "" {
 		return errors.New("openwiki.command is required")
+	}
+	if c.Documentation.Discovery.Mode != "hybrid" && c.Documentation.Discovery.Mode != "explicit" && c.Documentation.Discovery.Mode != "disabled" {
+		return errors.New("documentation.discovery.mode must be hybrid, explicit, or disabled")
+	}
+	if c.Documentation.Discovery.Required && c.Documentation.Discovery.Mode == "disabled" {
+		for _, component := range c.EnabledComponents() {
+			if component.Profile == "modular-application" {
+				return fmt.Errorf("disabled discovery cannot satisfy required discovery for modular component %q", component.ID)
+			}
+		}
+	}
+	if c.Documentation.Discovery.Required && c.Documentation.Discovery.Mode == "explicit" && len(c.DocumentationUnits) == 0 {
+		return errors.New("documentation.discovery.required with explicit mode requires documentationUnits")
+	}
+	if c.Documentation.Discovery.OnConflict.DomainIdentity == "" {
+		return errors.New("documentation.discovery.onConflict.domainIdentity is required")
+	}
+	for name, value := range map[string]string{
+		"domainIdentity":  c.Documentation.Discovery.OnConflict.DomainIdentity,
+		"sourceOwnership": c.Documentation.Discovery.OnConflict.SourceOwnership,
+		"moduleRole":      c.Documentation.Discovery.OnConflict.ModuleRole,
+		"ownership":       c.Documentation.Discovery.OnConflict.Ownership,
+		"criticality":     c.Documentation.Discovery.OnConflict.Criticality,
+		"relationships":   c.Documentation.Discovery.OnConflict.Relationships,
+	} {
+		if value != "fail" && value != "retain" {
+			return fmt.Errorf("documentation.discovery.onConflict.%s must be fail or retain", name)
+		}
 	}
 	if c.Documentation.FrontMatterPolicy != "" && c.Documentation.FrontMatterPolicy != "strict" && c.Documentation.FrontMatterPolicy != "namespaced" {
 		return errors.New("documentation.frontMatterPolicy must be strict or namespaced")

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fajarnugraha37/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/discovery"
 	"github.com/fajarnugraha37/wikiforge/internal/evidence"
 	"github.com/fajarnugraha37/wikiforge/internal/graph"
 	"github.com/fajarnugraha37/wikiforge/internal/model"
@@ -27,7 +28,14 @@ func (o *Orchestrator) runAdaptiveComponent(ctx context.Context, st *model.RunSt
 	if !isGitRepo(component.Repository) {
 		return model.ValidationResult{}, fmt.Errorf("component %s repository %s is not a Git repository", component.ID, component.Repository)
 	}
-	planResult, err := (planner.Planner{Config: o.Config}).Plan(component.ID, false)
+	artifacts := componentEvidenceArtifacts(o.Config.Workspace, component.ID)
+	_, semantic, _, discoveryMetrics, err := o.ensureSemanticDiscovery(ctx, component, artifacts)
+	if err != nil {
+		return model.ValidationResult{}, err
+	}
+	o.recordDiscoveryMetrics(discoveryMetrics, semantic)
+	plannerForComponent := planner.Planner{Config: o.Config, Semantic: map[string]discovery.SemanticDiscovery{component.ID: semantic}}
+	planResult, err := plannerForComponent.Plan(component.ID, false)
 	if err != nil {
 		return model.ValidationResult{}, err
 	}
@@ -35,12 +43,11 @@ func (o *Orchestrator) runAdaptiveComponent(ctx context.Context, st *model.RunSt
 		return model.ValidationResult{}, fmt.Errorf("adaptive plan for component %s is missing or ambiguous", component.ID)
 	}
 	componentPlan := planResult.Components[0]
-	discovery, err := (planner.Planner{Config: o.Config}).Discover(component.ID)
+	discoveryManifest, err := plannerForComponent.Discover(component.ID)
 	if err != nil {
 		return model.ValidationResult{}, err
 	}
-	artifacts := componentEvidenceArtifacts(o.Config.Workspace, component.ID)
-	if err := savePlanArtifacts(componentPlan, discovery, artifacts); err != nil {
+	if err := savePlanArtifacts(componentPlan, discoveryManifest, artifacts); err != nil {
 		return model.ValidationResult{}, err
 	}
 	profile, err := prompts.GetProfile(component.Profile)
@@ -79,6 +86,19 @@ func (o *Orchestrator) runAdaptiveComponent(ctx context.Context, st *model.RunSt
 	currentSourceHash := evidenceSourceHash(index)
 	currentDocsHash := directoryHash(component.DocumentationRoot())
 	target.Status = "running"
+	target.DiscoveryMode = semantic.DiscoveryMode
+	target.SourceRevision = semantic.SourceRevision
+	target.InventoryFingerprint = semantic.InventoryFingerprint
+	target.SemanticFingerprint = componentPlan.SemanticFingerprint
+	target.DiscoveryInventoryVersion = semantic.InventoryVersion
+	target.DiscoveryPromptVersion = semantic.PromptVersion
+	target.DiscoveryModelID = semantic.ModelID
+	target.SemanticDiscoveryPath = artifacts.Semantic
+	target.SemanticIdentitiesPath = artifacts.Identities
+	target.DiscoveryCalls = discoveryMetrics.Calls
+	target.DiscoveryCacheHit = discoveryMetrics.CacheHit
+	target.DiscoveryCounts = discoveryMetrics.Counts
+	target.DiscoveryStageMetrics = discoveryMetrics.StageMetrics
 	target.GitHead = gitHead(component.Repository)
 	target.SourceHash = currentSourceHash
 	target.PlanHash = currentPlanHash
@@ -217,7 +237,30 @@ func (o *Orchestrator) runAdaptiveSystem(ctx context.Context, st *model.RunState
 	if err := o.prepareSystemWorkspace(root, components); err != nil {
 		return model.ValidationResult{}, err
 	}
-	planResult, err := (planner.Planner{Config: o.Config}).Plan("", true)
+	semanticMap := map[string]discovery.SemanticDiscovery{}
+	totalDiscovery := discovery.RunMetrics{}
+	for _, component := range components {
+		artifacts := componentEvidenceArtifacts(o.Config.Workspace, component.ID)
+		_, semantic, _, discoveryMetrics, discoveryErr := o.ensureSemanticDiscovery(ctx, component, artifacts)
+		if discoveryErr != nil {
+			return model.ValidationResult{}, discoveryErr
+		}
+		semanticMap[component.ID] = semantic
+		o.recordDiscoveryMetrics(discoveryMetrics, semantic)
+		totalDiscovery.Stages += discoveryMetrics.Stages
+		totalDiscovery.Calls += discoveryMetrics.Calls
+		totalDiscovery.Retries += discoveryMetrics.Retries
+		totalDiscovery.CacheHit = totalDiscovery.CacheHit || discoveryMetrics.CacheHit
+		totalDiscovery.StageMetrics = append(totalDiscovery.StageMetrics, discoveryMetrics.StageMetrics...)
+		totalDiscovery.Counts.Modules += discoveryMetrics.Counts.Modules
+		totalDiscovery.Counts.Domains += discoveryMetrics.Counts.Domains
+		totalDiscovery.Counts.Flows += discoveryMetrics.Counts.Flows
+		totalDiscovery.Counts.Concerns += discoveryMetrics.Counts.Concerns
+		totalDiscovery.Counts.Ownership += discoveryMetrics.Counts.Ownership
+		totalDiscovery.Counts.Relationships += discoveryMetrics.Counts.Relationships
+	}
+	plannerForSystem := planner.Planner{Config: o.Config, Semantic: semanticMap}
+	planResult, err := plannerForSystem.Plan("", true)
 	if err != nil || planResult.System == nil {
 		if err == nil {
 			err = fmt.Errorf("adaptive system plan is disabled")
@@ -225,11 +268,11 @@ func (o *Orchestrator) runAdaptiveSystem(ctx context.Context, st *model.RunState
 		return model.ValidationResult{}, err
 	}
 	plan := *planResult.System
-	discovery, err := (planner.Planner{Config: o.Config}).Discover("")
+	discovery, err := plannerForSystem.Discover("")
 	if err != nil {
 		return model.ValidationResult{}, err
 	}
-	evidencePlan := planner.ComponentPlan{ComponentID: o.Config.System.ID, Profile: "system", Pages: plan.Pages, Packs: []string{"system"}}
+	evidencePlan := planner.ComponentPlan{ComponentID: o.Config.System.ID, Profile: "system", Pages: plan.Pages, Packs: []string{"system"}, SemanticFingerprint: plan.SemanticFingerprint}
 	artifacts := systemEvidenceArtifacts(o.Config.Workspace, o.Config.System.ID)
 	if err := savePlanArtifacts(evidencePlan, discovery, artifacts); err != nil {
 		return model.ValidationResult{}, err
@@ -372,6 +415,12 @@ func (o *Orchestrator) runAdaptiveSystem(ctx context.Context, st *model.RunState
 		return vr, err
 	}
 	target = o.getSystemTarget(st)
+	target.SemanticFingerprint = plan.SemanticFingerprint
+	target.DiscoveryMode = "aggregated"
+	target.DiscoveryCalls = totalDiscovery.Calls
+	target.DiscoveryCacheHit = totalDiscovery.CacheHit
+	target.DiscoveryCounts = totalDiscovery.Counts
+	target.DiscoveryStageMetrics = totalDiscovery.StageMetrics
 	target.GitHead = gitHead(root)
 	target.SourceHash = evidenceSourceHash(finalIndex)
 	target.PlanHash = currentPlanHash
@@ -472,7 +521,7 @@ func adaptiveUnitContext(units []planner.DocumentationUnit, id string) string {
 		if unit.ID != id {
 			continue
 		}
-		return fmt.Sprintf("Unit %s (%s)\nDomain: %s\nSubdomain: %s\nBounded context: %s\nSource roots: %s\nEvidence roots: %s\nRelated units: %s\nMaximum rows: %d\nReason: %s", unit.ID, unit.Kind, unit.Domain, unit.Subdomain, unit.BoundedContext, strings.Join(unit.SourceRoots, ", "), strings.Join(unit.EvidenceRoots, ", "), strings.Join(unit.RelatedUnits, ", "), unit.MaximumRows, unit.Reason)
+		return fmt.Sprintf("Unit %s (%s)\nDomain: %s\nSubdomain: %s\nBounded context: %s\nSource roots: %s\nEvidence roots: %s\nRelated units: %s\nReason: %s", unit.ID, unit.Kind, unit.Domain, unit.Subdomain, unit.BoundedContext, strings.Join(unit.SourceRoots, ", "), strings.Join(unit.EvidenceRoots, ", "), strings.Join(unit.RelatedUnits, ", "), unit.Reason)
 	}
 	return "This page is a cross-cutting view; use only repository evidence in the configured scope."
 }

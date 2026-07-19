@@ -113,6 +113,8 @@ func (r ExecRunner) Run(ctx context.Context, workdir string, operation string, p
 		args = append(args, "--update", "--print", cliPrompt)
 	case "prompt":
 		args = append(args, "--print", cliPrompt)
+	case "discovery":
+		args = append(args, "--print", cliPrompt)
 	default:
 		return "", fmt.Errorf("unsupported OpenWiki operation %q", operation)
 	}

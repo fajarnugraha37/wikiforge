@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/fajarnugraha37/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/model"
 	"github.com/fajarnugraha37/wikiforge/internal/planner"
 	"github.com/fajarnugraha37/wikiforge/internal/prompts"
 )
@@ -33,6 +35,9 @@ type deterministicAdaptiveRunner struct {
 func (r deterministicAdaptiveRunner) Check(context.Context) error { return nil }
 
 func (r deterministicAdaptiveRunner) Run(_ context.Context, workdir, operation, prompt string) (string, error) {
+	if operation == "discovery" {
+		return discoveryFixtureResult(prompt)
+	}
 	if operation == "update" {
 		for _, page := range r.plan.Pages {
 			if err := writeAdaptiveFixturePage(workdir, r.plan.Pages, page, "README.md"); err != nil {
@@ -57,6 +62,9 @@ func (r deterministicAdaptiveRunner) Run(_ context.Context, workdir, operation, 
 func (r *adaptiveFixtureRunner) Check(context.Context) error { return nil }
 
 func (r *adaptiveFixtureRunner) Run(_ context.Context, workdir, _ string, prompt string) (string, error) {
+	if strings.Contains(prompt, "You are performing WikiForge semantic discovery") {
+		return discoveryFixtureResult(prompt)
+	}
 	r.mu.Lock()
 	r.calls++
 	r.mu.Unlock()
@@ -115,8 +123,9 @@ func TestAdaptiveGenerationUsesPlannedHierarchy(t *testing.T) {
 	cfg.System.Enabled = true
 	cfg.System.Output = filepath.Join(root, "system-wiki")
 	cfg.Mermaid.Mode = "off"
-	cfg.Components = []config.ComponentConfig{{ID: "app", Type: "microservice", Profile: "application", Repository: repo, Enabled: true}}
-	planResult, err := (planner.Planner{Config: cfg}).Plan("app", true)
+	cfg.Components = []config.ComponentConfig{{ID: "app", Type: "microservice", Profile: "application", Repository: repo, Enabled: true, Packs: []string{"api", "configuration", "data", "jobs", "messaging", "security"}}}
+	semantic := testPlannerSemantic(cfg)
+	planResult, err := (planner.Planner{Config: cfg, Semantic: semantic}).Plan("app", true)
 	if err != nil || len(planResult.Components) != 1 {
 		t.Fatalf("adaptive plan: %v", err)
 	}
@@ -158,7 +167,7 @@ func TestAdaptiveGenerationUsesPlannedHierarchy(t *testing.T) {
 		filepath.Join(root, ".wikiforge", "components", "app", "coverage.json"),
 	} {
 		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("missing phase3 artifact %s: %v", path, err)
+			t.Fatalf("missing adaptive artifact %s: %v", path, err)
 		}
 	}
 	before := snapshotFiles(t, filepath.Join(repo, "openwiki"))
@@ -196,8 +205,8 @@ func TestAdaptiveIncrementalAndFullRegenerationAreEquivalent(t *testing.T) {
 	cfg.Workspace = root
 	cfg.System.Enabled = false
 	cfg.Mermaid.Mode = "off"
-	cfg.Components = []config.ComponentConfig{{ID: "app", Type: "application", Profile: "application", Repository: repo, Enabled: true}}
-	planResult, err := (planner.Planner{Config: cfg}).Plan("app", false)
+	cfg.Components = []config.ComponentConfig{{ID: "app", Type: "application", Profile: "application", Repository: repo, Enabled: true, Packs: []string{"api", "configuration", "data", "jobs", "messaging", "security"}}}
+	planResult, err := (planner.Planner{Config: cfg, Semantic: testPlannerSemantic(cfg)}).Plan("app", false)
 	if err != nil || len(planResult.Components) != 1 {
 		t.Fatalf("adaptive plan: %v", err)
 	}
@@ -220,6 +229,25 @@ func TestAdaptiveIncrementalAndFullRegenerationAreEquivalent(t *testing.T) {
 	if fmt.Sprint(incremental) != fmt.Sprint(full) {
 		t.Fatalf("incremental and full regeneration differ:\nincremental=%v\nfull=%v", incremental, full)
 	}
+}
+
+func discoveryFixtureResult(prompt string) (string, error) {
+	stage := "module-classification"
+	for _, candidate := range []string{"module-classification", "concern-flow-extraction", "semantic-synthesis"} {
+		if strings.Contains(prompt, "Stage: "+candidate) {
+			stage = candidate
+		}
+	}
+	b, err := json.Marshal(model.StageOutput{SchemaVersion: model.DiscoverySchemaVersion, Stage: stage, Repository: model.RepositoryFinding{Profile: "application", Status: model.StatusObserved, Confidence: "high"}, Unknowns: []model.UnknownFinding{{Dimension: "repository", Subject: "fixture", Status: model.StatusUncertain, Reason: "deterministic fixture"}}})
+	return string(b), err
+}
+
+func testPlannerSemantic(cfg config.Config) map[string]model.SemanticDiscovery {
+	result := map[string]model.SemanticDiscovery{}
+	for _, component := range cfg.Components {
+		result[component.ID] = model.SemanticDiscovery{SchemaVersion: model.DiscoverySchemaVersion, ComponentID: component.ID, RepositoryID: component.ID, DiscoveryMode: "hybrid", Repository: model.RepositoryFinding{Profile: component.Profile, Status: model.StatusObserved, Confidence: "high"}}
+	}
+	return result
 }
 
 func snapshotFiles(t *testing.T, root string) map[string]string {

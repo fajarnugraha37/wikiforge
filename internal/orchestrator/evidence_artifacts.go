@@ -16,21 +16,27 @@ import (
 )
 
 type evidenceArtifacts struct {
-	Discovery string
-	Plan      string
-	Index     string
-	Impact    string
-	Coverage  string
+	Inventory  string
+	Semantic   string
+	Identities string
+	Discovery  string
+	Plan       string
+	Index      string
+	Impact     string
+	Coverage   string
 }
 
 func componentEvidenceArtifacts(workspace, id string) evidenceArtifacts {
 	root := filepath.Join(workspace, ".wikiforge", "components", id)
 	return evidenceArtifacts{
-		Discovery: filepath.Join(root, "discovery.json"),
-		Plan:      filepath.Join(root, "plan.json"),
-		Index:     filepath.Join(root, "evidence-index.json"),
-		Impact:    filepath.Join(root, "impact-index.json"),
-		Coverage:  filepath.Join(root, "coverage.json"),
+		Inventory:  filepath.Join(root, "inventory.json"),
+		Semantic:   filepath.Join(root, "semantic-discovery.json"),
+		Identities: filepath.Join(root, "semantic-identities.json"),
+		Discovery:  filepath.Join(root, "discovery.json"),
+		Plan:       filepath.Join(root, "plan.json"),
+		Index:      filepath.Join(root, "evidence-index.json"),
+		Impact:     filepath.Join(root, "impact-index.json"),
+		Coverage:   filepath.Join(root, "coverage.json"),
 	}
 }
 

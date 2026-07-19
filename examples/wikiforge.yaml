@@ -1,4 +1,4 @@
-version: 3
+version: 4
 workspace: .
 
 openwiki:
@@ -36,8 +36,17 @@ documentation:
   catalogs:
     shardBy:
       - domain
-    maximumRowsPerPage: 150
-    maximumBytesPerPage: 524288
+  discovery:
+    mode: hybrid
+    required: true
+    reuseCache: true
+    onConflict:
+      domainIdentity: fail
+      sourceOwnership: fail
+      moduleRole: retain
+      ownership: retain
+      criticality: retain
+      relationships: retain
   evidence:
     include:
       - src/**

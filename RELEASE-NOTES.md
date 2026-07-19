@@ -56,4 +56,4 @@ Prompt and Mermaid paths remain absolute and normalized for Windows, macOS, and 
 
 ## Configuration and pipeline
 
-Only configuration version `3` is supported. The adaptive planner is the only documentation pipeline: page applicability, hierarchy, catalog sharding, evidence scope, and validation contracts come from the current plan. Generate a fresh run from a v3 configuration.
+Only configuration version `4` is supported. The adaptive planner is the only documentation pipeline: page applicability, hierarchy, catalog sharding, evidence scope, and validation contracts come from the current plan. Generate a fresh run from a v4 configuration.

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/fajarnugraha37/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/discovery"
 	"github.com/fajarnugraha37/wikiforge/internal/evidence"
 	"github.com/fajarnugraha37/wikiforge/internal/model"
 	"github.com/fajarnugraha37/wikiforge/internal/openwiki"
@@ -302,6 +303,47 @@ func (o *Orchestrator) recordEvidenceMetrics(index evidence.Index) {
 	o.metrics.EvidenceFiles += len(index.References)
 	o.metrics.EvidenceCacheHits += index.CacheHits
 	o.metrics.EvidenceCacheMisses += index.CacheMisses
+}
+
+func (o *Orchestrator) recordDiscoveryMetrics(run discovery.RunMetrics, result discovery.SemanticDiscovery) {
+	o.metricsMu.Lock()
+	defer o.metricsMu.Unlock()
+	if o.metrics == nil {
+		return
+	}
+	o.metrics.DiscoveryStages += run.Stages
+	o.metrics.DiscoveryCalls += run.Calls
+	if run.CacheHit {
+		o.metrics.DiscoveryCacheHits++
+	} else {
+		o.metrics.DiscoveryCacheMisses++
+	}
+	o.metrics.DiscoveryAccepted += result.Quality.AcceptedCount
+	o.metrics.DiscoveryUncertain += result.Quality.UncertainCount
+	o.metrics.DiscoveryConflicting += result.Quality.ConflictingCount
+	o.metrics.DiscoveryUnknown += result.Quality.UnknownCount
+	o.metrics.DiscoveryStageMetrics = append(o.metrics.DiscoveryStageMetrics, run.StageMetrics...)
+	o.metrics.DiscoveryCounts.Modules += run.Counts.Modules
+	o.metrics.DiscoveryCounts.Domains += run.Counts.Domains
+	o.metrics.DiscoveryCounts.Flows += run.Counts.Flows
+	o.metrics.DiscoveryCounts.Concerns += run.Counts.Concerns
+	o.metrics.DiscoveryCounts.Ownership += run.Counts.Ownership
+	o.metrics.DiscoveryCounts.Relationships += run.Counts.Relationships
+	o.metrics.DiscoveryInventoryVersions = appendUnique(o.metrics.DiscoveryInventoryVersions, result.InventoryVersion)
+	o.metrics.DiscoveryPromptVersions = appendUnique(o.metrics.DiscoveryPromptVersions, result.PromptVersion)
+	o.metrics.DiscoveryModelIDs = appendUnique(o.metrics.DiscoveryModelIDs, result.ModelID)
+}
+
+func appendUnique(values []string, value string) []string {
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func (o *Orchestrator) prepareSystemWorkspace(root string, components []config.ComponentConfig) error {

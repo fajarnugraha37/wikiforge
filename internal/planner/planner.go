@@ -1,8 +1,9 @@
 package planner
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -60,10 +61,12 @@ type DocumentationUnit struct {
 	BoundedContext string                `json:"boundedContext,omitempty"`
 	View           string                `json:"view,omitempty"`
 	EvidenceRoots  []string              `json:"evidenceRoots,omitempty"`
+	EvidenceIDs    []string              `json:"evidenceIds,omitempty"`
 	ShardBy        []string              `json:"shardBy,omitempty"`
-	MaximumRows    int                   `json:"maximumRows,omitempty"`
 	Explicit       bool                  `json:"explicit"`
 	Reason         string                `json:"reason"`
+	Provenance     string                `json:"provenance,omitempty"`
+	Confidence     string                `json:"confidence,omitempty"`
 }
 
 type DiscoveredComponent struct {
@@ -79,9 +82,10 @@ type DiscoveredComponent struct {
 }
 
 type DiscoveryManifest struct {
-	Components                  []DiscoveredComponent `json:"components"`
-	CandidateDocumentationUnits []DocumentationUnit   `json:"candidateDocumentationUnits"`
-	Unknowns                    []string              `json:"unknowns,omitempty"`
+	Components                  []DiscoveredComponent              `json:"components"`
+	CandidateDocumentationUnits []DocumentationUnit                `json:"candidateDocumentationUnits"`
+	Unknowns                    []string                           `json:"unknowns,omitempty"`
+	Semantic                    map[string]model.SemanticDiscovery `json:"semantic,omitempty"`
 }
 
 type PlannedPage struct {
@@ -100,19 +104,21 @@ type PlanDecision struct {
 }
 
 type ComponentPlan struct {
-	ComponentID string              `json:"componentId"`
-	Profile     string              `json:"profile"`
-	Views       []DocumentationView `json:"views"`
-	Packs       []string            `json:"packs"`
-	Units       []DocumentationUnit `json:"units"`
-	Pages       []PlannedPage       `json:"pages"`
-	Decisions   []PlanDecision      `json:"decisions"`
+	ComponentID         string              `json:"componentId"`
+	Profile             string              `json:"profile"`
+	Views               []DocumentationView `json:"views"`
+	Packs               []string            `json:"packs"`
+	Units               []DocumentationUnit `json:"units"`
+	Pages               []PlannedPage       `json:"pages"`
+	Decisions           []PlanDecision      `json:"decisions"`
+	SemanticFingerprint string              `json:"semanticFingerprint"`
 }
 
 type SystemPlan struct {
-	Views     []DocumentationView `json:"views"`
-	Pages     []PlannedPage       `json:"pages"`
-	Decisions []PlanDecision      `json:"decisions"`
+	Views               []DocumentationView `json:"views"`
+	Pages               []PlannedPage       `json:"pages"`
+	Decisions           []PlanDecision      `json:"decisions"`
+	SemanticFingerprint string              `json:"semanticFingerprint"`
 }
 
 type PlanResult struct {
@@ -121,7 +127,8 @@ type PlanResult struct {
 }
 
 type Planner struct {
-	Config config.Config
+	Config   config.Config
+	Semantic map[string]model.SemanticDiscovery
 }
 
 func (p Planner) Discover(componentID string) (DiscoveryManifest, error) {
@@ -133,9 +140,17 @@ func (p Planner) Discover(componentID string) (DiscoveryManifest, error) {
 	for _, unit := range p.Config.DocumentationUnits {
 		explicitByComponent[unit.Component] = append(explicitByComponent[unit.Component], unit)
 	}
-	manifest := DiscoveryManifest{}
+	manifest := DiscoveryManifest{Semantic: map[string]model.SemanticDiscovery{}}
 	for _, component := range components {
-		units, unknowns := discoverUnits(component, explicitByComponent[component.ID])
+		semantic, ok := p.Semantic[component.ID]
+		if !ok {
+			if p.Config.Documentation.Discovery.Mode != "explicit" && p.Config.Documentation.Discovery.Mode != "disabled" {
+				return DiscoveryManifest{}, fmt.Errorf("validated semantic discovery is required for component %s; run wikiforge discover first", component.ID)
+			}
+			semantic = explicitSemantic(component)
+			semantic.DiscoveryMode = p.Config.Documentation.Discovery.Mode
+		}
+		units, unknowns := discoverUnitsFromSemantic(component, explicitByComponent[component.ID], semantic)
 		unitIDs := make([]string, 0, len(units))
 		for _, unit := range units {
 			manifest.CandidateDocumentationUnits = append(manifest.CandidateDocumentationUnits, unit)
@@ -150,10 +165,11 @@ func (p Planner) Discover(componentID string) (DiscoveryManifest, error) {
 			Scope:              component.Scope,
 			Owners:             append([]string(nil), component.Owners...),
 			Capabilities:       append([]string(nil), component.Capabilities...),
-			Packs:              packsForComponent(component),
+			Packs:              packsForSemantic(component, semantic),
 			DocumentationUnits: unitIDs,
 		})
 		manifest.Unknowns = append(manifest.Unknowns, unknowns...)
+		manifest.Semantic[component.ID] = semantic
 	}
 	sort.Slice(manifest.Components, func(i, j int) bool { return manifest.Components[i].ID < manifest.Components[j].ID })
 	sort.Slice(manifest.CandidateDocumentationUnits, func(i, j int) bool {
@@ -169,6 +185,177 @@ func (p Planner) Discover(componentID string) (DiscoveryManifest, error) {
 	return manifest, nil
 }
 
+func explicitSemantic(component config.ComponentConfig) model.SemanticDiscovery {
+	return model.SemanticDiscovery{SchemaVersion: model.DiscoverySchemaVersion, ComponentID: component.ID, RepositoryID: component.ID, DiscoveryMode: "explicit", InventoryVersion: "explicit", PromptVersion: "explicit", Repository: model.RepositoryFinding{Profile: component.Profile, Status: model.StatusExplicitEnabled, Confidence: "high"}, Quality: model.QualityResult{Accepted: true}}
+}
+
+func discoverUnitsFromSemantic(component config.ComponentConfig, explicit []config.DocumentationUnitConfig, semantic model.SemanticDiscovery) ([]DocumentationUnit, []string) {
+	units, unknowns := explicitUnits(component, explicit)
+	explicitIDs := map[string]string{}
+	for _, unit := range units {
+		if unit.Kind != UnitDomain && unit.Kind != UnitFlow {
+			continue
+		}
+		explicitIDs[slug(unit.ID)] = unit.ID
+		if unit.Domain != "" {
+			explicitIDs[slug(unit.Domain)] = unit.ID
+		}
+	}
+	ownersBySubject := map[string][]string{}
+	for _, ownership := range semantic.Ownership {
+		ownersBySubject[ownership.SubjectID] = append([]string{}, ownership.Owners...)
+	}
+	seen := map[string]bool{}
+	for _, unit := range units {
+		seen[unit.ID] = true
+	}
+	if !seen[component.ID] {
+		units = append(units, DocumentationUnit{ID: component.ID, ComponentID: component.ID, Kind: UnitComponent, SourceRoots: []string{"."}, OutputPath: filepath.ToSlash(filepath.Join("components", component.ID)), Owners: append([]string{}, component.Owners...), Explicit: false, Provenance: "derived", Reason: "validated component boundary"})
+	}
+	for _, domain := range semantic.Domains {
+		if domain.Status != model.StatusObserved && domain.Status != model.StatusExplicitEnabled {
+			continue
+		}
+		if domain.ID == "" {
+			continue
+		}
+		if explicitID := explicitUnitForFinding(explicitIDs, domain.ID, domain.Candidate.CandidateKey, domain.Candidate.Name); explicitID != "" {
+			enrichExplicitDomainUnit(units, explicitID, domain)
+			seen[explicitID] = true
+			continue
+		}
+		if seen[domain.ID] {
+			continue
+		}
+		roots := append([]string{}, domain.SourceRoots...)
+		if len(roots) == 0 {
+			roots = []string{"."}
+		}
+		owners := append([]string{}, domain.Owners...)
+		if len(owners) == 0 {
+			owners = ownersBySubject[domain.ID]
+		}
+		related := append([]string{}, domain.ModuleIDs...)
+		evidenceIDs := append([]string{}, domain.EvidenceIDs...)
+		evidenceIDs = append(evidenceIDs, domain.Candidate.EvidenceIDs...)
+		units = append(units, DocumentationUnit{ID: domain.ID, ComponentID: component.ID, Kind: UnitDomain, SourceRoots: roots, RelatedUnits: related, OutputPath: filepath.ToSlash(filepath.Join("domains", domain.ID)), Owners: owners, Criticality: domain.Criticality, Domain: domain.Candidate.Name, Subdomain: domain.Subdomain, BoundedContext: domain.BoundedContext, EvidenceRoots: append([]string{}, roots...), EvidenceIDs: uniqueStrings(evidenceIDs), Confidence: domain.Confidence, Explicit: false, Provenance: "inferred", Reason: "accepted semantic domain finding"})
+		seen[domain.ID] = true
+	}
+	for _, flow := range semantic.Flows {
+		if flow.Status != model.StatusObserved && flow.Status != model.StatusExplicitEnabled {
+			continue
+		}
+		if flow.ID == "" || seen[flow.ID] {
+			continue
+		}
+		if explicitID := explicitUnitForFinding(explicitIDs, flow.ID, flow.Candidate.CandidateKey, flow.Candidate.Name); explicitID != "" {
+			enrichExplicitFlowUnit(units, explicitID, flow)
+			seen[explicitID] = true
+			continue
+		}
+		roots := append([]string{}, flow.SourceRoots...)
+		if len(roots) == 0 {
+			roots = []string{"."}
+		}
+		evidenceIDs := append([]string{}, flow.EvidenceIDs...)
+		evidenceIDs = append(evidenceIDs, flow.Candidate.EvidenceIDs...)
+		units = append(units, DocumentationUnit{ID: flow.ID, ComponentID: component.ID, Kind: UnitFlow, SourceRoots: roots, RelatedUnits: append([]string{}, flow.ModuleIDs...), OutputPath: filepath.ToSlash(filepath.Join("flows", flow.ID+".md")), Capabilities: append([]string{}, flow.Triggers...), EvidenceRoots: append([]string{}, roots...), EvidenceIDs: uniqueStrings(evidenceIDs), Confidence: flow.Confidence, Explicit: false, Provenance: "inferred", Reason: "accepted semantic flow finding"})
+		seen[flow.ID] = true
+	}
+	if len(semantic.Domains) == 0 && component.Profile == "modular-application" {
+		unknowns = append(unknowns, "no accepted semantic domain findings")
+	}
+	sort.Slice(units, func(i, j int) bool {
+		if units[i].Kind == units[j].Kind {
+			return units[i].ID < units[j].ID
+		}
+		return units[i].Kind < units[j].Kind
+	})
+	return units, unknowns
+}
+
+func explicitUnitForFinding(explicitIDs map[string]string, references ...string) string {
+	for _, reference := range references {
+		if id := explicitIDs[slug(reference)]; id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func enrichExplicitDomainUnit(units []DocumentationUnit, id string, finding model.DomainFinding) {
+	for i := range units {
+		if units[i].ID != id {
+			continue
+		}
+		if units[i].Domain == "" {
+			units[i].Domain = finding.Candidate.Name
+		}
+		if len(units[i].SourceRoots) == 0 {
+			units[i].SourceRoots = append([]string{}, finding.SourceRoots...)
+		}
+		if len(units[i].RelatedUnits) == 0 {
+			units[i].RelatedUnits = append([]string{}, finding.ModuleIDs...)
+		}
+		if len(units[i].Owners) == 0 {
+			units[i].Owners = append([]string{}, finding.Owners...)
+		}
+		if units[i].Criticality == "" {
+			units[i].Criticality = finding.Criticality
+		}
+		if units[i].Subdomain == "" {
+			units[i].Subdomain = finding.Subdomain
+		}
+		if units[i].BoundedContext == "" {
+			units[i].BoundedContext = finding.BoundedContext
+		}
+		units[i].EvidenceRoots = uniqueStrings(append(units[i].EvidenceRoots, finding.SourceRoots...))
+		units[i].EvidenceIDs = uniqueStrings(append(units[i].EvidenceIDs, finding.EvidenceIDs...))
+		return
+	}
+}
+
+func enrichExplicitFlowUnit(units []DocumentationUnit, id string, finding model.FlowFinding) {
+	for i := range units {
+		if units[i].ID != id {
+			continue
+		}
+		if len(units[i].SourceRoots) == 0 {
+			units[i].SourceRoots = append([]string{}, finding.SourceRoots...)
+		}
+		if len(units[i].RelatedUnits) == 0 {
+			units[i].RelatedUnits = append([]string{}, finding.ModuleIDs...)
+		}
+		if len(units[i].Capabilities) == 0 {
+			units[i].Capabilities = append([]string{}, finding.Triggers...)
+		}
+		units[i].EvidenceRoots = uniqueStrings(append(units[i].EvidenceRoots, finding.SourceRoots...))
+		units[i].EvidenceIDs = uniqueStrings(append(units[i].EvidenceIDs, finding.EvidenceIDs...))
+		return
+	}
+}
+
+func uniqueStrings(values []string) []string {
+	set := map[string]bool{}
+	result := []string{}
+	for _, value := range values {
+		if value != "" && !set[value] {
+			set[value] = true
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func explicitUnits(component config.ComponentConfig, explicit []config.DocumentationUnitConfig) ([]DocumentationUnit, []string) {
+	var units []DocumentationUnit
+	for _, unit := range explicit {
+		units = append(units, DocumentationUnit{ID: unit.ID, ComponentID: component.ID, Kind: DocumentationUnitKind(unit.Kind), SourceRoots: append([]string{}, unit.SourceRoots...), RelatedUnits: append([]string{}, unit.RelatedUnits...), OutputPath: unit.Output, Owners: append([]string{}, unit.Owners...), Capabilities: append([]string{}, unit.Capabilities...), Criticality: unit.Criticality, Domain: unit.Domain, Subdomain: unit.Subdomain, BoundedContext: unit.BoundedContext, View: unit.View, EvidenceRoots: append([]string{}, unit.EvidenceRoots...), ShardBy: append([]string{}, unit.ShardBy...), Explicit: true, Provenance: "explicit", Reason: "explicit documentation unit from configuration"})
+	}
+	return units, nil
+}
+
 func (p Planner) Plan(componentID string, includeSystem bool) (PlanResult, error) {
 	manifest, err := p.Discover(componentID)
 	if err != nil {
@@ -182,11 +369,11 @@ func (p Planner) Plan(componentID string, includeSystem bool) (PlanResult, error
 	for _, discovered := range manifest.Components {
 		component := componentByID[discovered.ID]
 		units := filterUnits(manifest.CandidateDocumentationUnits, component.ID)
-		result.Components = append(result.Components, buildComponentPlan(p.Config, component, units))
+		result.Components = append(result.Components, buildComponentPlan(p.Config, component, units, manifest.Semantic[component.ID]))
 	}
 	sort.Slice(result.Components, func(i, j int) bool { return result.Components[i].ComponentID < result.Components[j].ComponentID })
 	if includeSystem && p.Config.System.Enabled {
-		result.System = buildSystemPlan(p.Config, manifest.CandidateDocumentationUnits)
+		result.System = buildSystemPlan(p.Config, manifest.CandidateDocumentationUnits, p.Semantic)
 	}
 	return result, nil
 }
@@ -204,183 +391,14 @@ func (p Planner) selectedComponents(componentID string) ([]config.ComponentConfi
 	return nil, fmt.Errorf("no enabled component matched %q", componentID)
 }
 
-func discoverUnits(component config.ComponentConfig, explicit []config.DocumentationUnitConfig) ([]DocumentationUnit, []string) {
-	unitByID := map[string]DocumentationUnit{}
-	for _, unit := range explicit {
-		unitByID[unit.ID] = DocumentationUnit{
-			ID:             unit.ID,
-			ComponentID:    component.ID,
-			Kind:           DocumentationUnitKind(unit.Kind),
-			SourceRoots:    append([]string(nil), unit.SourceRoots...),
-			RelatedUnits:   append([]string(nil), unit.RelatedUnits...),
-			OutputPath:     unit.Output,
-			Owners:         append([]string(nil), unit.Owners...),
-			Capabilities:   append([]string(nil), unit.Capabilities...),
-			Criticality:    unit.Criticality,
-			Domain:         unit.Domain,
-			Subdomain:      unit.Subdomain,
-			BoundedContext: unit.BoundedContext,
-			View:           unit.View,
-			EvidenceRoots:  append([]string(nil), unit.EvidenceRoots...),
-			ShardBy:        append([]string(nil), unit.ShardBy...),
-			MaximumRows:    unit.MaximumRows,
-			Explicit:       true,
-			Reason:         "explicit documentation unit from configuration",
-		}
-	}
-	hasComponentUnit := false
-	hasDomainUnit := false
-	for _, unit := range unitByID {
-		if unit.Kind == UnitComponent {
-			hasComponentUnit = true
-		}
-		if unit.Kind == UnitDomain {
-			hasDomainUnit = true
-		}
-	}
-	if !hasComponentUnit {
-		unitByID[component.ID] = DocumentationUnit{
-			ID:           component.ID,
-			ComponentID:  component.ID,
-			Kind:         UnitComponent,
-			SourceRoots:  []string{"."},
-			OutputPath:   filepath.ToSlash(filepath.Join("components", component.ID)),
-			Owners:       append([]string(nil), component.Owners...),
-			Capabilities: append([]string(nil), component.Capabilities...),
-			Domain:       "",
-			Explicit:     false,
-			Reason:       "enabled component always gets a component documentation unit",
-		}
-	}
-	if !hasDomainUnit {
-		for _, capability := range component.Capabilities {
-			id := slug(capability)
-			if id == "" {
-				continue
-			}
-			unitByID[id] = DocumentationUnit{
-				ID:           id,
-				ComponentID:  component.ID,
-				Kind:         UnitDomain,
-				SourceRoots:  []string{"."},
-				OutputPath:   filepath.ToSlash(filepath.Join("domains", id)),
-				Owners:       append([]string(nil), component.Owners...),
-				Capabilities: []string{capability},
-				Domain:       capability,
-				Explicit:     false,
-				Reason:       "derived from component capability",
-			}
-			hasDomainUnit = true
-		}
-	}
-	if !hasUnitKind(unitByID, UnitFlow) {
-		for _, unit := range deriveFlowUnitsFromRepository(component) {
-			if _, exists := unitByID[unit.ID]; !exists {
-				unitByID[unit.ID] = unit
-			}
-		}
-	}
-	var unknowns []string
-	if !hasDomainUnit && component.Profile == "modular-application" {
-		derived := deriveDomainUnitsFromRepository(component)
-		if len(derived) == 0 {
-			unknowns = append(unknowns, fmt.Sprintf("component %s has modular-application profile but no domain candidates were discovered from capabilities or module roots", component.ID))
-		}
-		for _, unit := range derived {
-			if _, exists := unitByID[unit.ID]; exists {
-				continue
-			}
-			unitByID[unit.ID] = unit
-		}
-	}
-	units := make([]DocumentationUnit, 0, len(unitByID))
-	for _, unit := range unitByID {
-		units = append(units, unit)
-	}
-	sort.Slice(units, func(i, j int) bool {
-		if units[i].Kind == units[j].Kind {
-			return units[i].ID < units[j].ID
-		}
-		return units[i].Kind < units[j].Kind
-	})
-	return units, unknowns
-}
-
-func deriveDomainUnitsFromRepository(component config.ComponentConfig) []DocumentationUnit {
-	var units []DocumentationUnit
-	for _, root := range []string{"modules", "domains", "bounded-contexts", "contexts"} {
-		path := filepath.Join(component.WorkDir(), root)
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			id := slug(entry.Name())
-			if id == "" {
-				continue
-			}
-			units = append(units, DocumentationUnit{
-				ID:           id,
-				ComponentID:  component.ID,
-				Kind:         UnitDomain,
-				SourceRoots:  []string{filepath.ToSlash(filepath.Join(root, entry.Name()))},
-				OutputPath:   filepath.ToSlash(filepath.Join("domains", id)),
-				Owners:       append([]string(nil), component.Owners...),
-				Capabilities: []string{entry.Name()},
-				Domain:       entry.Name(),
-				Explicit:     false,
-				Reason:       fmt.Sprintf("derived from %s/%s repository root", root, entry.Name()),
-			})
-		}
-	}
-	sort.Slice(units, func(i, j int) bool { return units[i].ID < units[j].ID })
-	return units
-}
-
-func deriveFlowUnitsFromRepository(component config.ComponentConfig) []DocumentationUnit {
-	var units []DocumentationUnit
-	for _, root := range []string{"workflows", "bpmn", "processes"} {
-		path := filepath.Join(component.WorkDir(), root)
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			id := slug(strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())))
-			if id == "" {
-				continue
-			}
-			units = append(units, DocumentationUnit{
-				ID: "flow-" + id, ComponentID: component.ID, Kind: UnitFlow,
-				SourceRoots:  []string{filepath.ToSlash(filepath.Join(root, entry.Name()))},
-				OutputPath:   filepath.ToSlash(filepath.Join("flows", id+".md")),
-				Capabilities: []string{"workflow"}, Explicit: false,
-				Reason: fmt.Sprintf("derived from %s/%s workflow source", root, entry.Name()),
-			})
-		}
-	}
-	return units
-}
-
-func hasUnitKind(units map[string]DocumentationUnit, kind DocumentationUnitKind) bool {
-	for _, unit := range units {
-		if unit.Kind == kind {
-			return true
-		}
-	}
-	return false
-}
-
-func buildComponentPlan(cfg config.Config, component config.ComponentConfig, units []DocumentationUnit) ComponentPlan {
+func buildComponentPlan(cfg config.Config, component config.ComponentConfig, units []DocumentationUnit, semantic model.SemanticDiscovery) ComponentPlan {
 	plan := ComponentPlan{
-		ComponentID: component.ID,
-		Profile:     component.Profile,
-		Views:       componentViews(cfg.Documentation.Views, component.Profile),
-		Packs:       packsForComponent(component),
-		Units:       append([]DocumentationUnit(nil), units...),
+		ComponentID:         component.ID,
+		Profile:             component.Profile,
+		Views:               componentViews(cfg.Documentation.Views, component.Profile),
+		Packs:               packsForSemantic(component, semantic),
+		Units:               append([]DocumentationUnit(nil), units...),
+		SemanticFingerprint: semanticFingerprint(semantic),
 	}
 	plan.Pages = append(plan.Pages, PlannedPage{
 		Path:   "quickstart.md",
@@ -490,15 +508,43 @@ func buildComponentPlan(cfg config.Config, component config.ComponentConfig, uni
 	if containsView(plan.Views, ViewOperations) {
 		plan.Pages = append(plan.Pages, PlannedPage{Path: "operations/index.md", View: ViewOperations, Kind: PageIndex, Reason: "operations view is enabled for this profile"})
 	}
+	for _, domain := range semantic.Domains {
+		if domain.Status == model.StatusUncertain || domain.Status == model.StatusConflicting {
+			plan.Decisions = append(plan.Decisions, PlanDecision{Target: "domain:" + domain.Candidate.Name, Action: "retain-uncertain", Reason: "semantic domain was not promoted because its status is " + domain.Status})
+		}
+	}
+	for _, flow := range semantic.Flows {
+		if flow.Status == model.StatusUncertain || flow.Status == model.StatusConflicting {
+			plan.Decisions = append(plan.Decisions, PlanDecision{Target: "flow:" + flow.Candidate.Name, Action: "retain-uncertain", Reason: "semantic flow was not promoted because its status is " + flow.Status})
+		}
+	}
+	for _, module := range semantic.Modules {
+		if module.ID == "" {
+			continue
+		}
+		reason := "semantic module role=" + module.Role
+		if len(module.Domains) > 0 {
+			reason += " mapped-to=" + strings.Join(module.Domains, ",")
+		}
+		plan.Decisions = append(plan.Decisions, PlanDecision{Target: "module:" + module.ID, Action: "classify", Reason: reason})
+	}
+	for _, concern := range semantic.Concerns {
+		if concern.Concern == "" {
+			continue
+		}
+		action := "skip"
+		if concern.Status == model.StatusObserved || concern.Status == model.StatusExplicitEnabled {
+			action = "enable"
+		}
+		plan.Decisions = append(plan.Decisions, PlanDecision{Target: "concern:" + concern.Concern, Action: action, Reason: "semantic concern status=" + concern.Status + " confidence=" + concern.Confidence})
+	}
+	for _, unknown := range semantic.Unknowns {
+		plan.Decisions = append(plan.Decisions, PlanDecision{Target: unknown.Dimension + ":" + unknown.Subject, Action: "retain-unknown", Reason: unknown.Reason})
+	}
 
 	sort.Slice(plan.Pages, func(i, j int) bool { return plan.Pages[i].Path < plan.Pages[j].Path })
 	for i := range plan.Pages {
 		plan.Pages[i].Contract = pageContract(cfg, plan.Pages[i], plan.Packs)
-		for _, unit := range plan.Units {
-			if plan.Pages[i].OwnerUnit == unit.ID && unit.MaximumRows > 0 {
-				plan.Pages[i].Contract.MaximumRowsPerShard = unit.MaximumRows
-			}
-		}
 	}
 	sort.Slice(plan.Decisions, func(i, j int) bool {
 		if plan.Decisions[i].Target == plan.Decisions[j].Target {
@@ -571,7 +617,7 @@ func planCatalogPages(cfg config.Config, plan *ComponentPlan, domainUnits []Docu
 					View:      ViewCatalog,
 					Kind:      PageShard,
 					OwnerUnit: unit.ID,
-					Reason:    "domain-based sharding keeps large catalogs bounded and navigable",
+					Reason:    "domain-based sharding preserves an accepted semantic boundary",
 				})
 			}
 			continue
@@ -632,9 +678,9 @@ func planPlatformPages(plan *ComponentPlan) {
 	}
 }
 
-func buildSystemPlan(cfg config.Config, units []DocumentationUnit) *SystemPlan {
+func buildSystemPlan(cfg config.Config, units []DocumentationUnit, semantic map[string]model.SemanticDiscovery) *SystemPlan {
 	views := []DocumentationView{ViewSystem}
-	plan := &SystemPlan{Views: views}
+	plan := &SystemPlan{Views: views, SemanticFingerprint: semanticMapFingerprint(semantic)}
 	plan.Pages = append(plan.Pages,
 		PlannedPage{Path: "quickstart.md", View: ViewSystem, Kind: PageIndex, Reason: "system quickstart is the root entrypoint into the system hierarchy"},
 		PlannedPage{Path: "system/index.md", View: ViewSystem, Kind: PageIndex, Reason: "system view is enabled because whole-system aggregation is configured"},
@@ -677,29 +723,19 @@ func componentViews(configured []string, profile string) []DocumentationView {
 	return append([]DocumentationView(nil), defaults[profile]...)
 }
 
-func packsForComponent(component config.ComponentConfig) []string {
-	base := map[string][]string{
-		"application":         {"api", "configuration", "data", "jobs", "messaging", "security"},
-		"modular-application": {"api", "configuration", "data", "domain", "jobs", "messaging", "security"},
-		"reusable":            {"api", "configuration", "engineering", "integration"},
-		"infrastructure":      {"configuration", "deployment", "security", "telemetry"},
-		"configuration":       {"configuration", "security"},
-		"contracts":           {"api", "compatibility", "messaging"},
-		"generic":             {"api", "configuration"},
-	}[component.Profile]
+func packsForSemantic(component config.ComponentConfig, semantic model.SemanticDiscovery) []string {
 	set := map[string]bool{}
-	for _, pack := range base {
-		set[pack] = true
-	}
 	for _, pack := range component.Packs {
-		pack = strings.TrimSpace(strings.ToLower(pack))
-		if pack != "" {
-			set[pack] = true
+		if strings.TrimSpace(pack) != "" {
+			set[strings.ToLower(strings.TrimSpace(pack))] = true
 		}
 	}
-	if hasWorkflowSources(component.WorkDir()) {
-		set["workflow"] = true
-		set["bpmn"] = true
+	for _, concern := range semantic.Concerns {
+		if concern.Status == model.StatusObserved || concern.Status == model.StatusExplicitEnabled {
+			if concern.Concern != "" {
+				set[normalizeConcernPack(concern.Concern)] = true
+			}
+		}
 	}
 	out := make([]string, 0, len(set))
 	for pack := range set {
@@ -709,14 +745,14 @@ func packsForComponent(component config.ComponentConfig) []string {
 	return out
 }
 
-func hasWorkflowSources(root string) bool {
-	for _, directory := range []string{"workflows", "bpmn", "processes"} {
-		entries, err := os.ReadDir(filepath.Join(root, directory))
-		if err == nil && len(entries) > 0 {
-			return true
+func normalizeConcernPack(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, pair := range [][2]string{{"events", "messaging"}, {"interfaces", "api"}, {"apis", "api"}, {"workflows", "workflow"}, {"persistence", "data"}, {"databases", "data"}, {"authorization", "security"}, {"authentication", "security"}, {"observability", "telemetry"}} {
+		if value == pair[0] {
+			return pair[1]
 		}
 	}
-	return false
+	return value
 }
 
 func catalogShardDimension(cfg config.Config, domains []DocumentationUnit) string {
@@ -749,15 +785,25 @@ func distinctUnitOwners(units []DocumentationUnit) []string {
 	return owners
 }
 
+func semanticFingerprint(semantic model.SemanticDiscovery) string {
+	b, _ := json.Marshal(semantic)
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h[:])
+}
+
+func semanticMapFingerprint(semantic map[string]model.SemanticDiscovery) string {
+	b, _ := json.Marshal(semantic)
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h[:])
+}
+
 func pageContract(cfg config.Config, page PlannedPage, packs []string) model.PageContract {
 	contract := model.PageContract{
-		Path:                filepath.ToSlash(page.Path),
-		Kind:                page.Kind,
-		PathTemplate:        filepath.ToSlash(page.Path),
-		IndexPathTemplate:   indexPathFor(page.Path, page.Kind),
-		Applicability:       model.ApplicabilityRule{Views: []string{string(page.View)}, Packs: append([]string(nil), packs...)},
-		MaximumRowsPerShard: cfg.Documentation.Catalogs.MaximumRowsPerPage,
-		MaximumBytes:        cfg.Documentation.Catalogs.MaximumBytesPerPage,
+		Path:              filepath.ToSlash(page.Path),
+		Kind:              page.Kind,
+		PathTemplate:      filepath.ToSlash(page.Path),
+		IndexPathTemplate: indexPathFor(page.Path, page.Kind),
+		Applicability:     model.ApplicabilityRule{Views: []string{string(page.View)}, Packs: append([]string(nil), packs...)},
 	}
 	if page.Kind == PageShard {
 		if strings.HasPrefix(page.OwnerUnit, "owner:") {

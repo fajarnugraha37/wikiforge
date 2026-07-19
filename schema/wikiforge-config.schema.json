@@ -12,7 +12,7 @@
     "version": {
       "type": "integer",
       "enum": [
-        3
+        4
       ]
     },
     "workspace": {
@@ -146,14 +146,6 @@
                 "type": "string"
               }
             },
-            "maximumRowsPerPage": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "maximumBytesPerPage": {
-              "type": "integer",
-              "minimum": 1
-            }
           },
           "additionalProperties": false
         },
@@ -193,6 +185,29 @@
         },
         "requireRelationshipEvidence": {
           "type": "boolean"
+        },
+        "discovery": {
+          "type": "object",
+          "required": ["mode", "required", "reuseCache", "onConflict"],
+          "properties": {
+            "mode": { "enum": ["hybrid", "explicit", "disabled"] },
+            "required": { "type": "boolean" },
+            "reuseCache": { "type": "boolean" },
+            "onConflict": {
+              "type": "object",
+              "required": ["domainIdentity", "sourceOwnership", "moduleRole", "ownership", "criticality", "relationships"],
+              "properties": {
+                "domainIdentity": { "enum": ["fail", "retain"] },
+                "sourceOwnership": { "enum": ["fail", "retain"] },
+                "moduleRole": { "enum": ["fail", "retain"] },
+                "ownership": { "enum": ["fail", "retain"] },
+                "criticality": { "enum": ["fail", "retain"] },
+                "relationships": { "enum": ["fail", "retain"] }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -428,10 +443,6 @@
           "type": "array",
           "items": { "type": "string" }
         },
-        "maximumRows": {
-          "type": "integer",
-          "minimum": 1
-        }
       },
       "additionalProperties": false
     }

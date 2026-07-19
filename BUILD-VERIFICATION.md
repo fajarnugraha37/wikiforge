@@ -41,6 +41,7 @@ Release: `1.2.3`
   - cleanup.
 - Deterministic invocation/path failures skip retries; transient provider errors remain retryable.
 - Adaptive planner and end-to-end fake-runner orchestration for profiles, monorepo scopes, whole-system aggregation, validation, repair, reports, graph export, state, and update no-op behaviour.
+- Semantic discovery contract tests cover strict JSON, evidence-ID resolution, generic inventory, stable fingerprints, identity collisions, bounded staged calls, and cache invalidation.
 - Cross-compilation:
   - Linux amd64 and arm64;
   - Windows amd64 and arm64;
@@ -50,4 +51,4 @@ Release: `1.2.3`
 
 The production runner invokes the configured OpenWiki CLI. The default configuration remains pinned to `openwiki@0.2.0` through `npx`, and Mermaid rendering remains pinned to `@mermaid-js/mermaid-cli@11.12.0`.
 
-A live model-backed generation was not executed in this build environment because no model-provider credential was supplied. The executable boundary, prompt-file transport, arguments, streaming, heartbeat, cancellation, timeout, retry classification, adaptive orchestration, validation, repair, and aggregation are covered by automated tests.
+A live model-backed generation was not executed in this build environment because no model-provider credential was supplied. CI contains no live-model job. The executable boundary, discovery prompt transport, strict stage decoding, arguments, streaming, heartbeat, cancellation, timeout, retry classification, adaptive orchestration, validation, repair, and aggregation are covered by automated tests; run the real-provider E2E manually with approved credentials.

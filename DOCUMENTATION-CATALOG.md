@@ -1,6 +1,6 @@
 # WikiForge Documentation Catalog
 
-WikiForge generates adaptive documentation. Pages are planned from component type, capability packs, discovered source roots, explicit documentation units, and configured views. The tables below describe canonical ownership; a page is generated only when its view or pack is applicable.
+WikiForge generates adaptive documentation from one validated semantic discovery graph per component. The graph is evidence-backed; component packs and documentation units are explicit opt-ins, while profile names and capability strings cannot create semantic pages. The tables below describe canonical ownership.
 
 ## View hierarchy
 
@@ -65,7 +65,7 @@ Each flow unit receives one canonical `flows/<flow>.md` page plus the shared `fl
 | `telemetry` | `telemetry` | Logs, metrics, traces, instrumentation, propagation, exporters, backends, dashboards, and alerts. |
 | `deployment` | `deployment`, `container-runtime`, `container-and-deployment` | Docker/Compose, deployment resources, services, ingress, autoscaling, probes, configuration, and policy references. |
 
-A collection is an index page plus either one bounded collection page or deterministic shards such as `catalogs/interfaces/<domain>.md` or `catalogs/interfaces/<owner>.md`. Each catalog row requires a stable ID and evidence.
+A collection is an index page plus one collection page or deterministic shards such as `catalogs/interfaces/<domain>.md` or `catalogs/interfaces/<owner>.md`. There is no row or byte maximum. Sharding occurs only at accepted semantic domain, owner, or explicit-unit boundaries. Each catalog row requires a stable ID and evidence.
 
 ## Platform, engineering, and operations
 
@@ -96,6 +96,9 @@ System evidence is assembled from immutable component documentation snapshots un
 
 Generated operational artifacts are not documentation pages:
 
+- `.wikiforge/components/<id>/inventory.json`
+- `.wikiforge/components/<id>/semantic-discovery.json`
+- `.wikiforge/components/<id>/semantic-identities.json`
 - `.wikiforge/components/<id>/discovery.json`
 - `.wikiforge/components/<id>/plan.json`
 - `.wikiforge/components/<id>/evidence-index.json`
@@ -106,4 +109,4 @@ Generated operational artifacts are not documentation pages:
 - `.wikiforge/validation/<id>.json`
 - `.wikiforge/state.json`
 
-The planner implementation in `internal/planner/planner.go` is the executable source of truth for applicability, paths, packs, and shard decisions. This catalog documents the intended contract and must remain aligned with that planner.
+The discovery validator and planner implementation are the executable source of truth for evidence promotion, applicability, paths, packs, and shard decisions. This catalog documents the intended contract and must remain aligned with them.

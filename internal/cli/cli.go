@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/fajarnugraha37/wikiforge/internal/assets"
 	"github.com/fajarnugraha37/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/discovery"
 	"github.com/fajarnugraha37/wikiforge/internal/evidence"
 	"github.com/fajarnugraha37/wikiforge/internal/graph"
 	"github.com/fajarnugraha37/wikiforge/internal/model"
@@ -171,6 +173,20 @@ func (c CLI) doctorCommand(ctx context.Context, args []string) int {
 	if cfg.OpenWiki.Command == "npx" || cfg.OpenWiki.Command == "npm" || cfg.OpenWiki.Command == "node" || cfg.Mermaid.Command == "npx" {
 		check("Node.js >= 22", checkNodeVersion(ctx, 22))
 	}
+	check("discovery configuration", func() error {
+		if cfg.Documentation.Discovery.Mode != "hybrid" && cfg.Documentation.Discovery.Mode != "explicit" && cfg.Documentation.Discovery.Mode != "disabled" {
+			return fmt.Errorf("unsupported discovery mode %q", cfg.Documentation.Discovery.Mode)
+		}
+		if cfg.Documentation.Discovery.Required && cfg.Documentation.Discovery.Mode == "explicit" && len(cfg.DocumentationUnits) == 0 {
+			return errors.New("explicit required discovery needs documentationUnits")
+		}
+		if cfg.Documentation.Discovery.Mode == "hybrid" && cfg.Documentation.Discovery.Required {
+			if err := checkProviderConfiguration(cfg); err != nil {
+				return err
+			}
+		}
+		return checkExternalPath(cfg.Documentation.Evidence.CacheDirectory)
+	}())
 	runner := openwiki.ExecRunner{Config: cfg.OpenWiki}
 	check("OpenWiki command", runner.Check(ctx))
 	if cfg.Mermaid.Mode == "render" {
@@ -178,6 +194,7 @@ func (c CLI) doctorCommand(ctx context.Context, args []string) int {
 		check("Mermaid command", err)
 	}
 	check("workspace path portability", checkExternalPath(cfg.Workspace))
+	check("artifact directories writable", checkArtifactDirectories(cfg))
 	if cfg.System.Enabled {
 		check("system output path portability", checkExternalPath(cfg.System.Output))
 		if cfg.System.FactsPath != "" {
@@ -232,7 +249,11 @@ func (c CLI) planCommand(args []string) int {
 	if err != nil {
 		return c.printErr(err)
 	}
-	result, err := (planner.Planner{Config: cfg}).Plan(selected, !*skip)
+	semantic, err := loadSemanticMap(cfg, selected)
+	if err != nil {
+		return c.printErr(err)
+	}
+	result, err := (planner.Planner{Config: cfg, Semantic: semantic}).Plan(selected, !*skip)
 	if err != nil {
 		return c.printErr(err)
 	}
@@ -251,16 +272,126 @@ func (c CLI) discoverCommand(args []string) int {
 	if err != nil {
 		return c.printErr(err)
 	}
-	manifest, err := (planner.Planner{Config: cfg}).Discover(selected)
-	if err != nil {
-		return c.printErr(err)
+	runner := openwiki.ExecRunner{Config: cfg.OpenWiki, Out: c.Out, LiveOutput: true}
+	matched := false
+	for _, component := range cfg.EnabledComponents() {
+		if selected != "" && selected != component.ID {
+			continue
+		}
+		matched = true
+		root := filepath.Join(cfg.Workspace, ".wikiforge", "components", component.ID)
+		var previous discovery.IdentityManifest
+		_ = discovery.LoadJSON(filepath.Join(root, "semantic-identities.json"), &previous)
+		inv, semantic, identities, _, err := (discovery.Engine{Config: cfg, Runner: runner}).Discover(context.Background(), component, previous)
+		if err != nil {
+			return c.printErr(err)
+		}
+		if err := discovery.SaveJSON(filepath.Join(root, "inventory.json"), inv); err != nil {
+			return c.printErr(err)
+		}
+		if err := discovery.SaveJSON(filepath.Join(root, "semantic-discovery.json"), semantic); err != nil {
+			return c.printErr(err)
+		}
+		if err := discovery.SaveJSON(filepath.Join(root, "semantic-identities.json"), identities); err != nil {
+			return c.printErr(err)
+		}
+		plannerInstance := planner.Planner{Config: cfg, Semantic: map[string]discovery.SemanticDiscovery{component.ID: semantic}}
+		planResult, err := plannerInstance.Plan(component.ID, false)
+		if err != nil {
+			return c.printErr(err)
+		}
+		discoveryManifest, err := plannerInstance.Discover(component.ID)
+		if err != nil {
+			return c.printErr(err)
+		}
+		if len(planResult.Components) != 1 {
+			return c.printErr(fmt.Errorf("component %s discovery plan is missing or ambiguous", component.ID))
+		}
+		if err := discovery.SaveJSON(filepath.Join(root, "discovery.json"), discoveryManifest); err != nil {
+			return c.printErr(err)
+		}
+		if err := discovery.SaveJSON(filepath.Join(root, "plan.json"), planResult.Components[0]); err != nil {
+			return c.printErr(err)
+		}
+		printDiscoverySummary(c.Out, component.ID, inv, semantic)
+		b, _ := json.MarshalIndent(semantic, "", "  ")
+		fmt.Fprintln(c.Out, string(b))
 	}
-	b, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return c.printErr(err)
+	if !matched {
+		return c.printErr(fmt.Errorf("no enabled component matched %q", selected))
 	}
-	fmt.Fprintln(c.Out, string(b))
 	return 0
+}
+
+func printDiscoverySummary(out io.Writer, componentID string, inv discovery.Inventory, semantic discovery.SemanticDiscovery) {
+	fmt.Fprintf(out, "discovery component=%s profile=%s status=%s confidence=%s evidence=%d projects=%d\n", componentID, semantic.Repository.Profile, semantic.Repository.Status, semantic.Repository.Confidence, len(inv.Evidence), len(inv.Projects))
+	modules := append([]discovery.ModuleFinding(nil), semantic.Modules...)
+	sort.Slice(modules, func(i, j int) bool { return modules[i].Candidate.Name < modules[j].Candidate.Name })
+	for _, item := range modules {
+		fmt.Fprintf(out, "module %s role=%s status=%s confidence=%s evidence=%d\n", item.Candidate.Name, item.Role, item.Status, item.Confidence, len(item.EvidenceIDs))
+	}
+	domains := append([]discovery.DomainFinding(nil), semantic.Domains...)
+	sort.Slice(domains, func(i, j int) bool { return domains[i].Candidate.Name < domains[j].Candidate.Name })
+	for _, item := range domains {
+		fmt.Fprintf(out, "domain %s id=%s status=%s confidence=%s evidence=%d\n", item.Candidate.Name, item.ID, item.Status, item.Confidence, len(item.EvidenceIDs))
+	}
+	flows := append([]discovery.FlowFinding(nil), semantic.Flows...)
+	sort.Slice(flows, func(i, j int) bool { return flows[i].Candidate.Name < flows[j].Candidate.Name })
+	for _, item := range flows {
+		fmt.Fprintf(out, "flow %s id=%s status=%s confidence=%s triggers=%s evidence=%d\n", item.Candidate.Name, item.ID, item.Status, item.Confidence, strings.Join(item.Triggers, ","), len(item.EvidenceIDs))
+	}
+	concerns := append([]discovery.ConcernFinding(nil), semantic.Concerns...)
+	sort.Slice(concerns, func(i, j int) bool { return concerns[i].Concern < concerns[j].Concern })
+	for _, item := range concerns {
+		fmt.Fprintf(out, "concern %s status=%s confidence=%s evidence=%d\n", item.Concern, item.Status, item.Confidence, len(item.EvidenceIDs))
+	}
+	fmt.Fprintf(out, "ownership=%d relationships=%d conflicts=%d unknowns=%d\n", len(semantic.Ownership), len(semantic.Relationships), len(semantic.Conflicts), len(semantic.Unknowns))
+	for _, item := range semantic.Conflicts {
+		fmt.Fprintf(out, "conflict dimension=%s subjects=%s message=%s\n", item.Dimension, strings.Join(item.SubjectIDs, ","), item.Message)
+	}
+	for _, item := range semantic.Unknowns {
+		fmt.Fprintf(out, "unknown dimension=%s subject=%s status=%s reason=%s\n", item.Dimension, item.Subject, item.Status, item.Reason)
+	}
+}
+
+func loadSemanticMap(cfg config.Config, selected string) (map[string]discovery.SemanticDiscovery, error) {
+	result := map[string]discovery.SemanticDiscovery{}
+	for _, component := range cfg.EnabledComponents() {
+		if selected != "" && selected != component.ID {
+			continue
+		}
+		path := filepath.Join(cfg.Workspace, ".wikiforge", "components", component.ID, "semantic-discovery.json")
+		var semantic discovery.SemanticDiscovery
+		if err := discovery.LoadJSON(path, &semantic); err != nil {
+			if cfg.Documentation.Discovery.Mode == "explicit" || cfg.Documentation.Discovery.Mode == "disabled" {
+				result[component.ID] = explicitSemanticForCLI(component)
+				continue
+			}
+			return nil, fmt.Errorf("component %s semantic discovery is missing or invalid: %w; run wikiforge discover --component %s", component.ID, err, component.ID)
+		}
+		var inventory discovery.Inventory
+		if err := discovery.LoadJSON(filepath.Join(cfg.Workspace, ".wikiforge", "components", component.ID, "inventory.json"), &inventory); err != nil {
+			return nil, fmt.Errorf("component %s inventory is missing or invalid: %w; run wikiforge discover --component %s", component.ID, err, component.ID)
+		}
+		if err := discovery.Validate(inventory, semantic); err != nil || semantic.CacheFingerprint != discovery.CacheFingerprint(inventory, cfg, component) {
+			if err == nil {
+				err = fmt.Errorf("discovery cache fingerprint is stale")
+			}
+			return nil, fmt.Errorf("component %s semantic discovery is stale: %v; run wikiforge discover --component %s", component.ID, err, component.ID)
+		}
+		if err := discovery.ValidatePromotion(semantic, cfg.Documentation.Discovery.OnConflict); err != nil {
+			return nil, fmt.Errorf("component %s semantic discovery is not promotable: %w", component.ID, err)
+		}
+		result[component.ID] = semantic
+	}
+	if selected != "" && len(result) == 0 {
+		return nil, fmt.Errorf("no enabled component matched %q", selected)
+	}
+	return result, nil
+}
+
+func explicitSemanticForCLI(component config.ComponentConfig) discovery.SemanticDiscovery {
+	return discovery.SemanticDiscovery{SchemaVersion: discovery.SchemaVersion, ComponentID: component.ID, RepositoryID: component.ID, DiscoveryMode: "explicit", InventoryVersion: "explicit", PromptVersion: "explicit", Repository: discovery.RepositoryFinding{Profile: component.Profile, Status: discovery.StatusExplicitEnabled, Confidence: "high"}, Quality: discovery.QualityResult{Accepted: true}}
 }
 
 func (c CLI) coverageCommand(args []string) int {
@@ -348,7 +479,7 @@ func printAdaptivePlan(out io.Writer, result planner.PlanResult, explain bool) {
 	for _, componentPlan := range result.Components {
 		fmt.Fprintf(out, "component %s profile=%s views=%s packs=%s\n", componentPlan.ComponentID, componentPlan.Profile, joinViews(componentPlan.Views), strings.Join(componentPlan.Packs, ","))
 		for _, unit := range componentPlan.Units {
-			fmt.Fprintf(out, "  unit %-18s kind=%s output=%s\n", unit.ID, unit.Kind, unit.OutputPath)
+			fmt.Fprintf(out, "  unit %-18s kind=%s source=%s confidence=%s evidence=%d output=%s\n", unit.ID, unit.Kind, unit.Provenance, unit.Confidence, len(unit.EvidenceIDs), unit.OutputPath)
 			if explain {
 				fmt.Fprintf(out, "    reason: %s\n", unit.Reason)
 			}
@@ -454,7 +585,11 @@ func (c CLI) validateCommand(ctx context.Context, args []string) int {
 	matched := false
 	if *system {
 		var r interface{}
-		plan, planErr := (planner.Planner{Config: cfg}).Plan("", true)
+		semantic, loadErr := loadSemanticMap(cfg, "")
+		if loadErr != nil {
+			return c.printErr(loadErr)
+		}
+		plan, planErr := (planner.Planner{Config: cfg, Semantic: semantic}).Plan("", true)
 		if planErr != nil || plan.System == nil {
 			if planErr == nil {
 				planErr = errors.New("system plan is disabled")
@@ -474,7 +609,11 @@ func (c CLI) validateCommand(ctx context.Context, args []string) int {
 			}
 			matched = true
 			var r interface{}
-			plan, planErr := (planner.Planner{Config: cfg}).Plan(comp.ID, false)
+			semantic, loadErr := loadSemanticMap(cfg, comp.ID)
+			if loadErr != nil {
+				return c.printErr(loadErr)
+			}
+			plan, planErr := (planner.Planner{Config: cfg, Semantic: semantic}).Plan(comp.ID, false)
 			if planErr != nil || len(plan.Components) != 1 {
 				if planErr == nil {
 					planErr = fmt.Errorf("plan for component %s is missing or ambiguous", comp.ID)
@@ -588,6 +727,46 @@ func checkExternalPath(value string) error {
 	}
 	_, err := pathutil.ExternalToolPath(value)
 	return err
+}
+
+func checkArtifactDirectories(cfg config.Config) error {
+	paths := []string{cfg.Workspace, cfg.Documentation.Evidence.CacheDirectory}
+	if cfg.System.Enabled {
+		paths = append(paths, cfg.System.Output)
+	}
+	for _, component := range cfg.EnabledComponents() {
+		paths = append(paths, component.DocumentationRoot())
+	}
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return fmt.Errorf("create %q: %w", path, err)
+		}
+		probe := filepath.Join(path, ".wikiforge-write-test")
+		if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+			return fmt.Errorf("write %q: %w", path, err)
+		}
+		if err := os.Remove(probe); err != nil {
+			return fmt.Errorf("cleanup %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func checkProviderConfiguration(cfg config.Config) error {
+	if strings.TrimSpace(cfg.OpenWiki.ModelID) != "" {
+		return nil
+	}
+	for _, key := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"} {
+		if strings.TrimSpace(cfg.OpenWiki.Environment[key]) != "" || strings.TrimSpace(os.Getenv(key)) != "" {
+			return nil
+		}
+	}
+	return errors.New("hybrid discovery requires openwiki.modelId or a supported provider credential environment variable")
 }
 
 func isGitRepo(path string) bool {

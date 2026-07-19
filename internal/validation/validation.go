@@ -200,14 +200,6 @@ func (v Validator) validate(ctx context.Context, targetID, root, sourceBase stri
 					add("DOC-REQUIRED-TABLE", "error", rel, "missing required catalog table header: "+contract.RequiredTableHeader)
 				} else if !catalogHasDataRow(content, contract.RequiredTableHeader) {
 					add("DOC-CATALOG-EMPTY", "error", rel, "catalog must contain at least one evidence-backed or explicit Not Observed/Unknown row")
-				} else {
-					rows, bytes := catalogTableStats(content, contract.RequiredTableHeader)
-					if contract.MaximumRowsPerShard > 0 && rows > contract.MaximumRowsPerShard {
-						add("CATALOG-ROW-LIMIT", "error", rel, fmt.Sprintf("catalog contains %d data rows; maximum is %d", rows, contract.MaximumRowsPerShard))
-					}
-					if contract.MaximumBytes > 0 && bytes > contract.MaximumBytes {
-						add("CATALOG-BYTE-LIMIT", "error", rel, fmt.Sprintf("catalog table is %d bytes; maximum is %d", bytes, contract.MaximumBytes))
-					}
 				}
 			}
 			adaptiveSemantic := strings.HasPrefix(profile, "adaptive/") || profile == "adaptive/system"

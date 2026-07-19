@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/fajarnugraha37/wikiforge/internal/config"
+	"github.com/fajarnugraha37/wikiforge/internal/model"
 	"github.com/fajarnugraha37/wikiforge/internal/planner"
 )
 
@@ -56,8 +57,11 @@ func TestPhase4PlannerBenchmarkThresholds(t *testing.T) {
 			cfg := config.Defaults()
 			cfg.Workspace = root
 			cfg.System.Enabled = false
-			cfg.Components = []config.ComponentConfig{{ID: fixture.ID, Type: fixture.Type, Profile: fixture.Profile, Repository: root, Enabled: true, Capabilities: []string{"order-management"}}}
-			result, err := (planner.Planner{Config: cfg}).Plan(fixture.ID, false)
+			configuredPacks := append([]string{}, fixture.RequiredPacks...)
+			configuredPacks = append(configuredPacks, "api", "configuration", "data", "jobs", "messaging", "security", "deployment", "telemetry")
+			cfg.Components = []config.ComponentConfig{{ID: fixture.ID, Type: fixture.Type, Profile: fixture.Profile, Repository: root, Enabled: true, Capabilities: []string{"order-management"}, Packs: configuredPacks}}
+			semantic := map[string]model.SemanticDiscovery{fixture.ID: {SchemaVersion: model.DiscoverySchemaVersion, ComponentID: fixture.ID, RepositoryID: fixture.ID, DiscoveryMode: "explicit", Repository: model.RepositoryFinding{Profile: fixture.Profile, Status: model.StatusExplicitEnabled, Confidence: "high"}}}
+			result, err := (planner.Planner{Config: cfg, Semantic: semantic}).Plan(fixture.ID, false)
 			if err != nil || len(result.Components) != 1 {
 				t.Fatalf("planning failed: %v", err)
 			}

@@ -11,8 +11,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-
-	"github.com/fajarnugraha37/wikiforge/internal/planner"
 )
 
 const (
@@ -180,7 +178,7 @@ func BuildIndexCached(root, repositoryID, revision string, include, exclude []st
 			authority = AuthorityTracked
 		}
 		entry, cached := cache.Entries[rel]
-		if cached && cacheEntryValid(entry, info, objects[rel], authority) {
+		if cached && cacheEntryValid(entry, path, info, objects[rel], authority) {
 			index.CacheHits++
 			updatedCache.Entries[rel] = entry
 			if entry.Binary {
@@ -222,14 +220,23 @@ func makeReference(repositoryID, revision, path, contentHash string, lines int, 
 	return EvidenceReference{ID: "evidence:" + hex.EncodeToString(idHash[:]), RepositoryID: repositoryID, Revision: revision, Path: path, LineStart: 1, LineEnd: lines, EvidenceType: evidenceType, ContentHash: contentHash, Authority: authority}
 }
 
-func cacheEntryValid(entry cacheEntry, info os.FileInfo, gitObject string, authority EvidenceAuthority) bool {
+func cacheEntryValid(entry cacheEntry, path string, info os.FileInfo, gitObject string, authority EvidenceAuthority) bool {
 	if entry.Path == "" || entry.Size != info.Size() {
 		return false
 	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	hash := sha256.Sum256(content)
+	if hex.EncodeToString(hash[:]) != entry.Hash {
+		return false
+	}
 	if authority == AuthorityTracked {
+		// The Git index identifies the committed blob; content hash identifies the working tree.
 		return gitObject != "" && gitObject == entry.GitObject
 	}
-	return entry.ModifiedNS == info.ModTime().UnixNano()
+	return true
 }
 
 func loadEvidenceCache(path string) evidenceCache {
@@ -302,16 +309,17 @@ func AttachDocumentation(root string, index Index) (Index, error) {
 	return index, nil
 }
 
-func BuildImpact(index Index, plan planner.ComponentPlan, previousRevision, revision string, changedPaths []string, fullScan bool, reason string) ChangeImpact {
+func BuildImpact(index Index, plan any, previousRevision, revision string, changedPaths []string, fullScan bool, reason string) ChangeImpact {
 	return BuildImpactWithPrevious(index, Index{}, plan, previousRevision, revision, changedPaths, fullScan, reason)
 }
 
 // BuildImpactWithPrevious retains dependencies from the previous successful
 // index so deleted or renamed evidence can still invalidate its former pages.
-func BuildImpactWithPrevious(index, previous Index, plan planner.ComponentPlan, previousRevision, revision string, changedPaths []string, fullScan bool, reason string) ChangeImpact {
+func BuildImpactWithPrevious(index, previous Index, plan any, previousRevision, revision string, changedPaths []string, fullScan bool, reason string) ChangeImpact {
+	snapshot := snapshotFromPlan(plan)
 	impact := ChangeImpact{SchemaVersion: SchemaVersion, RepositoryID: index.RepositoryID, PreviousRevision: previousRevision, Revision: revision, ChangedPaths: uniqueSorted(changedPaths), AffectedPages: map[string][]string{}, AffectedUnits: map[string][]string{}, FullScan: fullScan, Reason: reason}
 	pageByUnit := map[string][]string{}
-	for _, page := range plan.Pages {
+	for _, page := range snapshot.Pages {
 		pagePath := filepath.ToSlash(page.Path)
 		if fullScan {
 			impact.AffectedPages[pagePath] = []string{"full-scope fallback"}
@@ -340,7 +348,7 @@ func BuildImpactWithPrevious(index, previous Index, plan planner.ComponentPlan, 
 				impact.AffectedPages[page] = append(impact.AffectedPages[page], "evidence:"+path)
 			}
 		}
-		for _, unit := range plan.Units {
+		for _, unit := range snapshot.Units {
 			for _, root := range unit.SourceRoots {
 				root = strings.TrimSuffix(filepath.ToSlash(filepath.Clean(root)), "/")
 				if root == "." || changed == root || strings.HasPrefix(changed, root+"/") {
@@ -361,15 +369,16 @@ func BuildImpactWithPrevious(index, previous Index, plan planner.ComponentPlan, 
 	return impact
 }
 
-func BuildCoverage(componentID string, plan planner.ComponentPlan, index Index) CoverageManifest {
+func BuildCoverage(componentID string, plan any, index Index) CoverageManifest {
+	snapshot := snapshotFromPlan(plan)
 	depsByPage := map[string][]string{}
 	for _, dep := range index.Dependencies {
 		depsByPage[dep.PageID] = append(depsByPage[dep.PageID], dep.EvidenceID)
 	}
 	manifest := CoverageManifest{SchemaVersion: SchemaVersion, RepositoryID: index.RepositoryID, Revision: index.Revision}
-	for _, unit := range plan.Units {
+	for _, unit := range snapshot.Units {
 		var pages, evidenceIDs []string
-		for _, page := range plan.Pages {
+		for _, page := range snapshot.Pages {
 			if page.OwnerUnit != unit.ID {
 				continue
 			}
@@ -386,9 +395,9 @@ func BuildCoverage(componentID string, plan planner.ComponentPlan, index Index) 
 		}
 		manifest.Entries = append(manifest.Entries, CoverageEntry{ID: componentID + ":unit:" + unit.ID, Scope: "unit", ComponentID: componentID, UnitID: unit.ID, State: state, PageIDs: uniqueSorted(pages), EvidenceIDs: uniqueSorted(evidenceIDs)})
 	}
-	for _, pack := range plan.Packs {
+	for _, pack := range snapshot.Packs {
 		var pages, evidenceIDs []string
-		for _, page := range plan.Pages {
+		for _, page := range snapshot.Pages {
 			if strings.HasPrefix(page.Path, "catalogs/") || strings.HasPrefix(page.Path, "platform/") {
 				pageID := CanonicalPath(page.Path)
 				pages = append(pages, pageID)
@@ -404,13 +413,35 @@ func BuildCoverage(componentID string, plan planner.ComponentPlan, index Index) 
 		}
 		manifest.Entries = append(manifest.Entries, CoverageEntry{ID: componentID + ":pack:" + pack, Scope: "concern-pack", ComponentID: componentID, ConcernPack: pack, State: state, PageIDs: uniqueSorted(pages), EvidenceIDs: uniqueSorted(evidenceIDs)})
 	}
-	manifest.Entries = append(manifest.Entries, CoverageEntry{ID: componentID + ":component", Scope: "component", ComponentID: componentID, State: stateForPages(plan.Pages, depsByPage)})
-	manifest.Entries = append(manifest.Entries, CoverageEntry{ID: index.RepositoryID + ":repository", Scope: "repository", State: stateForPages(plan.Pages, depsByPage)})
+	manifest.Entries = append(manifest.Entries, CoverageEntry{ID: componentID + ":component", Scope: "component", ComponentID: componentID, State: stateForPages(snapshot.Pages, depsByPage)})
+	manifest.Entries = append(manifest.Entries, CoverageEntry{ID: index.RepositoryID + ":repository", Scope: "repository", State: stateForPages(snapshot.Pages, depsByPage)})
 	sort.Slice(manifest.Entries, func(i, j int) bool { return manifest.Entries[i].ID < manifest.Entries[j].ID })
 	return manifest
 }
 
-func stateForPages(pages []planner.PlannedPage, deps map[string][]string) CoverageState {
+type planSnapshot struct {
+	Packs []string `json:"packs"`
+	Units []struct {
+		ID          string   `json:"id"`
+		SourceRoots []string `json:"sourceRoots"`
+	} `json:"units"`
+	Pages []struct {
+		Path      string `json:"path"`
+		OwnerUnit string `json:"ownerUnit"`
+	} `json:"pages"`
+}
+
+func snapshotFromPlan(plan any) planSnapshot {
+	b, _ := json.Marshal(plan)
+	var snapshot planSnapshot
+	_ = json.Unmarshal(b, &snapshot)
+	return snapshot
+}
+
+func stateForPages(pages []struct {
+	Path      string `json:"path"`
+	OwnerUnit string `json:"ownerUnit"`
+}, deps map[string][]string) CoverageState {
 	if len(pages) == 0 {
 		return NotInspected
 	}

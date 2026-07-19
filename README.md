@@ -15,7 +15,7 @@ configuration
   -> optional whole-system federation
 ```
 
-There is no fixed-layout executor or compatibility command surface. Configuration files must use version `3`.
+There is no fixed-layout executor or compatibility command surface. Configuration files must use version `4`.
 
 ## Capabilities
 
@@ -44,7 +44,7 @@ WikiForge never stores provider secrets in generated configuration, documentatio
 
 ## Quick Start
 
-Create a v3 configuration:
+Create a v4 configuration:
 
 ```bash
 wikiforge init
@@ -93,7 +93,7 @@ See [DOCUMENTATION-CONFIG.md](DOCUMENTATION-CONFIG.md) for the complete configur
 A component describes a repository or relative monorepo scope:
 
 ```yaml
-version: 3
+version: 4
 
 components:
   - id: commerce-core
@@ -103,6 +103,19 @@ components:
     owners: [commerce-team]
     capabilities: [order-management, pricing]
     packs: [workflow, telemetry]
+
+documentation:
+  discovery:
+    mode: hybrid
+    required: true
+    reuseCache: true
+    onConflict:
+      domainIdentity: fail
+      sourceOwnership: fail
+      moduleRole: retain
+      ownership: retain
+      criticality: retain
+      relationships: retain
 ```
 
 Use documentation units when one runtime component contains multiple domains, bounded contexts, workflows, catalogs, or operational views:
@@ -116,14 +129,13 @@ documentationUnits:
     evidenceRoots: [modules/order, workflows/order]
     output: domains/order-management
     shardBy: [domain]
-    maximumRows: 150
 ```
 
-Components are typed as applications, modular applications, reusable libraries/frameworks, infrastructure, configuration, contracts, or generic repositories. The profile and capability packs are selected from these declarations and repository discovery.
+Components are typed as applications, modular applications, reusable libraries/frameworks, infrastructure, configuration, contracts, or generic repositories. Hybrid discovery determines semantic domains, flows, concerns, ownership, and relationships from the evidence registry; component packs and documentation units are explicit opt-ins, while capabilities are hints only.
 
 ## Adaptive output
 
-The planner creates only applicable pages and records every decision:
+The planner consumes the validated semantic discovery graph and records every decision:
 
 ```text
 quickstart.md
@@ -132,7 +144,7 @@ quickstart.md
       -> leaf page or catalog shard
 ```
 
-Small repositories do not receive empty concern pages. Large catalogs receive typed collection pages and shards when configured dimensions apply. Workflow and BPMN sources are discovered from `workflows/`, `bpmn/`, and `processes/`.
+Small repositories do not receive empty concern pages. Catalogs have no row or byte maximum; shards exist only at accepted semantic domain, owner, or explicit-unit boundaries. Workflow and BPMN pages require evidence-backed discovery findings.
 
 ## Evidence and validation
 
@@ -140,6 +152,9 @@ Every adaptive run persists artifacts below `.wikiforge/`:
 
 ```text
 components/<component-id>/
+  inventory.json
+  semantic-discovery.json
+  semantic-identities.json
   discovery.json
   plan.json
   evidence-index.json
@@ -176,4 +191,4 @@ No CI job invokes an LLM or requires provider credentials. Real OpenWiki executi
 - [DOCUMENTATION-CATALOG.md](DOCUMENTATION-CATALOG.md): adaptive views, packs, and catalog locations.
 - [BUILD-VERIFICATION.md](BUILD-VERIFICATION.md): local build verification record.
 - [RELEASING.md](RELEASING.md): release workflow.
-- [schema/wikiforge-config.schema.json](schema/wikiforge-config.schema.json): machine-readable v3 schema.
+- [schema/wikiforge-config.schema.json](schema/wikiforge-config.schema.json): machine-readable v4 schema.

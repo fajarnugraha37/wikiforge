@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-func TestLoadV3ComponentsAndScopes(t *testing.T) {
+func TestLoadV4ComponentsAndScopes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wikiforge.yaml")
-	content := `version: 3
+	content := `version: 4
 workspace: .
 openwiki:
   command: npx
@@ -57,10 +57,10 @@ system:
 	}
 }
 
-func TestLoadV3DocumentationUnitsAndPlanningFields(t *testing.T) {
+func TestLoadV4DocumentationUnitsAndPlanningFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wikiforge.yaml")
-	content := `version: 3
+	content := `version: 4
 openwiki:
   command: npx
 mermaid:
@@ -73,7 +73,6 @@ documentation:
   catalogs:
     shardBy:
       - domain
-    maximumRowsPerPage: 120
   evidence:
     include:
       - src/**
@@ -107,11 +106,8 @@ system:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Version != 3 {
+	if cfg.Version != 4 {
 		t.Fatalf("version=%d", cfg.Version)
-	}
-	if cfg.Documentation.Catalogs.MaximumRowsPerPage != 120 {
-		t.Fatalf("unexpected documentation config: %+v", cfg.Documentation)
 	}
 	if len(cfg.Documentation.Views) != 3 || cfg.Documentation.Views[0] != "component" {
 		t.Fatalf("views not loaded: %+v", cfg.Documentation.Views)
@@ -121,5 +117,19 @@ system:
 	}
 	if len(cfg.DocumentationUnits) != 1 || cfg.DocumentationUnits[0].Output != "flows/submit-order" {
 		t.Fatalf("documentation unit not loaded: %+v", cfg.DocumentationUnits)
+	}
+}
+
+func TestDisabledDiscoveryIsOnlyAllowedWhenNotRequiredForModularComponents(t *testing.T) {
+	cfg := Defaults()
+	cfg.Documentation.Discovery.Mode = "disabled"
+	cfg.Documentation.Discovery.Required = false
+	cfg.Components = []ComponentConfig{{ID: "app", Profile: "modular-application", Repository: ".", Enabled: true}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("disabled optional discovery should be valid: %v", err)
+	}
+	cfg.Documentation.Discovery.Required = true
+	if err := Validate(cfg); err == nil {
+		t.Fatal("required disabled discovery should reject modular components")
 	}
 }
