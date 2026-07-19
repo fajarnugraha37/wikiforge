@@ -2,7 +2,6 @@ package openwiki
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,8 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/example/wikiforge/internal/config"
-	"github.com/example/wikiforge/internal/pathutil"
+	"github.com/fajarnugraha37/wikiforge/internal/config"
 )
 
 type Runner interface {
@@ -77,7 +75,7 @@ func (r ExecRunner) Check(ctx context.Context) error {
 	args = append(args, "--help")
 	cmd := exec.CommandContext(checkCtx, r.Config.Command, args...)
 	cmd.Env = mergedEnv(r.Config.Environment)
-	var stderr bytes.Buffer
+	stderr := boundedOutput{max: 64 * 1024}
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -115,6 +113,8 @@ func (r ExecRunner) Run(ctx context.Context, workdir string, operation string, p
 		args = append(args, "--update", "--print", cliPrompt)
 	case "prompt":
 		args = append(args, "--print", cliPrompt)
+	case "discovery":
+		args = append(args, "--print", cliPrompt)
 	default:
 		return "", fmt.Errorf("unsupported OpenWiki operation %q", operation)
 	}
@@ -151,7 +151,17 @@ func (r ExecRunner) Run(ctx context.Context, workdir string, operation string, p
 		live = true
 	}
 
-	var stdout, stderr bytes.Buffer
+	captureLimit := r.Config.MaxCaptureBytes
+	if captureLimit <= 0 {
+		captureLimit = 256 * 1024
+	}
+	stdoutLog, stderrLog, closeLogs, err := openRunLogs(r.Config.LogDirectory, label)
+	if err != nil {
+		return "", err
+	}
+	defer closeLogs()
+	stdout := boundedOutput{max: captureLimit, full: stdoutLog}
+	stderr := boundedOutput{max: captureLimit, full: stderrLog}
 	var captureMu sync.Mutex
 	var lastOutput atomic.Int64
 	started := time.Now()
@@ -212,8 +222,8 @@ func (r ExecRunner) Run(ctx context.Context, workdir string, operation string, p
 }
 
 // CheckPromptTransport verifies that a component work directory can host a
-// temporary prompt and that the path exported to Node/agent tooling is an
-// absolute, quote-free, cross-platform representation.
+// temporary prompt and that the path exported to OpenWiki is an absolute
+// virtual-repository path, not a host filesystem path.
 func CheckPromptTransport(workdir string) error {
 	cliPrompt, toolPath, cleanup, err := externalizePrompt(workdir, "WikiForge prompt transport preflight")
 	if err != nil {
@@ -233,7 +243,14 @@ func CheckPromptTransport(workdir string) error {
 	if extracted != toolPath {
 		return fmt.Errorf("prompt bridge path mismatch: got %q want %q", extracted, toolPath)
 	}
-	native := filepath.FromSlash(toolPath)
+	absoluteWorkdir, err := canonicalWorkdir(workdir)
+	if err != nil {
+		return fmt.Errorf("resolve prompt workdir: %w", err)
+	}
+	native, err := promptHostPath(absoluteWorkdir, toolPath)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(native); err != nil {
 		return fmt.Errorf("portable prompt path cannot be reopened: %w", err)
 	}
@@ -264,10 +281,11 @@ func externalizePrompt(workdir, prompt string) (cliPrompt, toolPath string, clea
 	if err != nil {
 		return "", "", func() {}, fmt.Errorf("externalize OpenWiki prompt: absolute workdir: %w", err)
 	}
-	if err := os.MkdirAll(absoluteWorkdir, 0o755); err != nil {
+	openWikiRoot := filepath.Join(absoluteWorkdir, "openwiki")
+	if err := os.MkdirAll(openWikiRoot, 0o755); err != nil {
 		return "", "", func() {}, fmt.Errorf("externalize OpenWiki prompt: create workdir: %w", err)
 	}
-	f, err := os.CreateTemp(absoluteWorkdir, ".wikiforge-prompt-*.md")
+	f, err := os.CreateTemp(openWikiRoot, ".wikiforge-prompt-*.md")
 	if err != nil {
 		return "", "", func() {}, fmt.Errorf("externalize OpenWiki prompt: create temporary file: %w", err)
 	}
@@ -287,11 +305,7 @@ func externalizePrompt(workdir, prompt string) (cliPrompt, toolPath string, clea
 		cleanup()
 		return "", "", func() {}, fmt.Errorf("externalize OpenWiki prompt: close temporary file: %w", err)
 	}
-	toolPath, err = pathutil.ExternalToolPath(name)
-	if err != nil {
-		cleanup()
-		return "", "", func() {}, fmt.Errorf("externalize OpenWiki prompt: portable absolute path: %w", err)
-	}
+	toolPath = "/openwiki/" + filepath.ToSlash(filepath.Base(name))
 	ref, err := json.Marshal(struct {
 		Path string `json:"path"`
 	}{Path: toolPath})
@@ -303,8 +317,20 @@ func externalizePrompt(workdir, prompt string) (cliPrompt, toolPath string, clea
 	// truncate or reinterpret embedded newlines even when Go supplied one argv
 	// element, which previously hid the path from OpenWiki and caused it to ask
 	// the user for clarification while still exiting successfully.
-	cliPrompt = promptBridgePrefix + string(ref) + " This is a non-interactive WikiForge phase. Parse the JSON object after WIKIFORGE_PROMPT_REF, take only its path string value without quotation marks, and immediately use the filesystem read tool to read that exact absolute UTF-8 file. Execute every instruction in that file now. Do not ask for clarification, do not search for another specification such as wikiforge.yaml, do not merely summarize the file, and do not modify, document, move, or delete the prompt file."
+	cliPrompt = promptBridgePrefix + string(ref) + " This is a non-interactive WikiForge page task. Parse the JSON object after WIKIFORGE_PROMPT_REF, take only its path string value without quotation marks, and immediately use the filesystem read tool to read that exact absolute virtual UTF-8 file. The path is rooted at the repository virtual filesystem and begins with /openwiki/; do not convert it to a host path. Execute every instruction in that file now. Do not ask for clarification, do not search for another specification such as wikiforge.yaml, do not merely summarize the file, and do not modify, document, move, or delete the prompt file."
 	return cliPrompt, toolPath, cleanup, nil
+}
+
+func promptHostPath(workdir, virtualPath string) (string, error) {
+	const root = "/openwiki/"
+	if !strings.HasPrefix(virtualPath, root) {
+		return "", fmt.Errorf("prompt virtual path must start with %s: %q", root, virtualPath)
+	}
+	fileName := strings.TrimPrefix(virtualPath, root)
+	if fileName == "" || strings.ContainsAny(fileName, `/\\`) || fileName == "." || fileName == ".." || strings.Contains(fileName, "..") {
+		return "", fmt.Errorf("prompt virtual path is invalid: %q", virtualPath)
+	}
+	return filepath.Join(workdir, "openwiki", fileName), nil
 }
 
 func promptPathFromBridge(cliPrompt string) (string, error) {
@@ -378,7 +404,42 @@ func mergedEnv(extra map[string]string) []string {
 	return env
 }
 
-func streamLines(r io.Reader, stream, label string, live bool, out io.Writer, capture *bytes.Buffer, captureMu *sync.Mutex, lastOutput *atomic.Int64, wg *sync.WaitGroup) {
+type boundedOutput struct {
+	max       int
+	data      []byte
+	full      io.Writer
+	truncated bool
+}
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	if b.full != nil {
+		_, _ = b.full.Write(p)
+	}
+	if b.max <= 0 {
+		return len(p), nil
+	}
+	if len(p) >= b.max {
+		b.data = append(b.data[:0], p[len(p)-b.max:]...)
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(b.data)+len(p) > b.max {
+		remove := len(b.data) + len(p) - b.max
+		b.data = append(b.data[:0], b.data[remove:]...)
+		b.truncated = true
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
+}
+
+func (b *boundedOutput) String() string {
+	if !b.truncated {
+		return string(b.data)
+	}
+	return "[output truncated; showing diagnostic tail]\n" + string(b.data)
+}
+
+func streamLines(r io.Reader, stream, label string, live bool, out io.Writer, capture *boundedOutput, captureMu *sync.Mutex, lastOutput *atomic.Int64, wg *sync.WaitGroup) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	// Model/tool output can contain large JSON or Markdown lines.
@@ -387,8 +448,7 @@ func streamLines(r io.Reader, stream, label string, live bool, out io.Writer, ca
 		line := scanner.Text()
 		lastOutput.Store(time.Now().UnixNano())
 		captureMu.Lock()
-		capture.WriteString(line)
-		capture.WriteByte('\n')
+		_, _ = capture.Write([]byte(line + "\n"))
 		captureMu.Unlock()
 		if live {
 			writeConsole(out, "[%s][%s] %s\n", label, stream, line)
@@ -396,10 +456,31 @@ func streamLines(r io.Reader, stream, label string, live bool, out io.Writer, ca
 	}
 	if err := scanner.Err(); err != nil {
 		captureMu.Lock()
-		fmt.Fprintf(capture, "stream read error: %v\n", err)
+		_, _ = capture.Write([]byte(fmt.Sprintf("stream read error: %v\n", err)))
 		captureMu.Unlock()
 		writeConsole(out, "[%s][%s] stream read error: %v\n", label, stream, err)
 	}
+}
+
+func openRunLogs(directory, label string) (io.Writer, io.Writer, func(), error) {
+	if strings.TrimSpace(directory) == "" {
+		return nil, nil, func() {}, nil
+	}
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return nil, nil, func() {}, fmt.Errorf("create OpenWiki log directory: %w", err)
+	}
+	safe := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "_").Replace(label)
+	base := filepath.Join(directory, fmt.Sprintf("%s-%d", safe, time.Now().UnixNano()))
+	stdout, err := os.Create(base + "-stdout.log")
+	if err != nil {
+		return nil, nil, func() {}, fmt.Errorf("create OpenWiki stdout log: %w", err)
+	}
+	stderr, err := os.Create(base + "-stderr.log")
+	if err != nil {
+		_ = stdout.Close()
+		return nil, nil, func() {}, fmt.Errorf("create OpenWiki stderr log: %w", err)
+	}
+	return stdout, stderr, func() { _ = stdout.Close(); _ = stderr.Close() }, nil
 }
 
 func compactDuration(d time.Duration) string {

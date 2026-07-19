@@ -60,6 +60,39 @@ func TestNormalizeRelativeAcceptsBothSeparators(t *testing.T) {
 	}
 }
 
+func TestResolveKeepsRelativePathsUnderBase(t *testing.T) {
+	base := t.TempDir()
+	want := filepath.Join(base, "config", "wikiforge.yaml")
+	got, err := Resolve(base, `config\wikiforge.yaml`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestResolveAcceptsNativeAbsolutePath(t *testing.T) {
+	base := t.TempDir()
+	absolute := filepath.Join(base, "config", "wikiforge.yaml")
+	got, err := Resolve(base, absolute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != absolute {
+		t.Fatalf("got %q want %q", got, absolute)
+	}
+}
+
+func TestResolveRejectsForeignWindowsAbsolutePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows drive paths are native on Windows")
+	}
+	if _, err := Resolve(t.TempDir(), `C:\workspace\wikiforge.yaml`); err == nil {
+		t.Fatal("expected a foreign Windows absolute path to be rejected")
+	}
+}
+
 func TestValidatePortableSegment(t *testing.T) {
 	for _, value := range []string{"sentinel", "order-service.v2", "資料"} {
 		if err := ValidatePortableSegment(value); err != nil {

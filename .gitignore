@@ -5,3 +5,6 @@
 *.exe
 *.test
 .DS_Store
+.tmp/
+.codex/
+.github/workflows/openwiki-update.yml

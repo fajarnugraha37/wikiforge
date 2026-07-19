@@ -1,7 +1,7 @@
 <!-- WIKIFORGE:START -->
 # WikiForge Component Documentation Contract
 
-This wiki is generated and maintained through phased OpenWiki runs orchestrated by WikiForge.
+This wiki is generated and maintained through adaptive OpenWiki page runs orchestrated by WikiForge.
 
 ## Component identity
 

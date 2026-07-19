@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/wikiforge-config.schema.json",
+  "$id": "https://raw.githubusercontent.com/fajarnugraha37/wikiforge/main/schema/wikiforge-config.schema.json",
   "title": "WikiForge Configuration",
   "type": "object",
   "required": [
     "version",
-    "openwiki"
+    "openwiki",
+    "components"
   ],
   "properties": {
     "version": {
       "type": "integer",
       "enum": [
-        1,
-        2
+        4
       ]
     },
     "workspace": {
@@ -41,6 +41,13 @@
           "type": "integer",
           "minimum": 1
         },
+        "maxCaptureBytes": {
+          "type": "integer",
+          "minimum": 1024
+        },
+        "logDirectory": {
+          "type": "string"
+        },
         "environment": {
           "type": "object",
           "additionalProperties": {
@@ -57,11 +64,6 @@
           "type": "integer",
           "minimum": 1
         },
-        "parallelServices": {
-          "type": "integer",
-          "minimum": 1,
-          "deprecated": true
-        },
         "maxProcessRetries": {
           "type": "integer",
           "minimum": 0
@@ -73,9 +75,9 @@
         "continueOnComponentFailure": {
           "type": "boolean"
         },
-        "continueOnServiceFailure": {
+        "isolateSameRepository": {
           "type": "boolean",
-          "deprecated": true
+          "description": "Run scoped components from one repository in isolated staging worktrees when safe."
         }
       },
       "additionalProperties": false
@@ -118,6 +120,94 @@
             "type": "string"
           },
           "minItems": 1
+        },
+        "views": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "system",
+              "domain",
+              "component",
+              "flow",
+              "catalog",
+              "platform",
+              "engineering",
+              "operations"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "catalogs": {
+          "type": "object",
+          "properties": {
+            "shardBy": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+          },
+          "additionalProperties": false
+        },
+        "evidence": {
+          "type": "object",
+          "properties": {
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "exclude": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "cacheDirectory": {
+              "type": "string"
+            },
+            "maxFileBytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "frontMatterPolicy": {
+          "enum": ["strict", "namespaced"]
+        },
+        "requireVerifiedEvidence": {
+          "type": "boolean"
+        },
+        "requireCatalogIdentity": {
+          "type": "boolean"
+        },
+        "requireRelationshipEvidence": {
+          "type": "boolean"
+        },
+        "discovery": {
+          "type": "object",
+          "required": ["mode", "required", "reuseCache", "onConflict"],
+          "properties": {
+            "mode": { "enum": ["hybrid", "explicit", "disabled"] },
+            "required": { "type": "boolean" },
+            "reuseCache": { "type": "boolean" },
+            "onConflict": {
+              "type": "object",
+              "required": ["domainIdentity", "sourceOwnership", "moduleRole", "ownership", "criticality", "relationships"],
+              "properties": {
+                "domainIdentity": { "enum": ["fail", "retain"] },
+                "sourceOwnership": { "enum": ["fail", "retain"] },
+                "moduleRole": { "enum": ["fail", "retain"] },
+                "ownership": { "enum": ["fail", "retain"] },
+                "criticality": { "enum": ["fail", "retain"] },
+                "relationships": { "enum": ["fail", "retain"] }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -144,6 +234,13 @@
         "timeoutSeconds": {
           "type": "integer",
           "minimum": 1
+        },
+        "cacheDirectory": {
+          "type": "string"
+        },
+        "maxWorkers": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "additionalProperties": false
@@ -155,11 +252,10 @@
         "$ref": "#/$defs/component"
       }
     },
-    "services": {
+    "documentationUnits": {
       "type": "array",
-      "deprecated": true,
       "items": {
-        "$ref": "#/$defs/legacyService"
+        "$ref": "#/$defs/documentationUnit"
       }
     },
     "system": {
@@ -190,24 +286,13 @@
       "additionalProperties": false
     }
   },
-  "anyOf": [
-    {
-      "required": [
-        "components"
-      ]
-    },
-    {
-      "required": [
-        "services"
-      ]
-    }
-  ],
   "$defs": {
     "component": {
       "type": "object",
       "required": [
         "id",
-        "type"
+        "type",
+        "repository"
       ],
       "properties": {
         "id": {
@@ -237,10 +322,6 @@
         "scope": {
           "type": "string"
         },
-        "path": {
-          "type": "string",
-          "deprecated": true
-        },
         "enabled": {
           "type": "boolean"
         },
@@ -261,44 +342,107 @@
           "items": {
             "type": "string"
           }
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "packs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "anyOf": [
-            {
-              "required": [
-                "repository"
-              ]
-            },
-            {
-              "required": [
-                "path"
-              ]
-            }
-          ]
-        }
-      ]
+      "additionalProperties": false
     },
-    "legacyService": {
+    "documentationUnit": {
       "type": "object",
       "required": [
         "id",
-        "path"
+        "component",
+        "kind",
+        "output"
       ],
       "properties": {
         "id": {
           "type": "string",
           "minLength": 1
         },
-        "path": {
+        "component": {
           "type": "string",
           "minLength": 1
         },
-        "enabled": {
-          "type": "boolean"
-        }
+        "kind": {
+          "enum": [
+            "component",
+            "domain",
+            "flow",
+            "catalog",
+            "platform",
+            "engineering",
+            "operations"
+          ]
+        },
+        "sourceRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "relatedUnits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "output": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "criticality": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "subdomain": {
+          "type": "string"
+        },
+        "boundedContext": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        },
+        "evidenceRoots": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "shardBy": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
       },
       "additionalProperties": false
     }

@@ -1,27 +1,28 @@
 ---
 type: Reference
 title: WikiForge Configuration Model
-description: YAML/JSON configuration schema, component types, profile selection, path normalization, and validation rules
+description: YAML/JSON configuration schema (v3), component types, documentation units, evidence config, adaptive planning, and validation rules
 tags: [configuration, yaml, components, profiles]
 resource: /internal/config/config.go
 ---
 
 # Configuration Model
 
-WikiForge uses a YAML or JSON configuration file (default `wikiforge.yaml`) with a version 2 schema and backward-compatible v1 migration.
+WikiForge uses a YAML or JSON configuration file (default `wikiforge.yaml`) with a version 3 schema. Version 1 and 2 configs are migrated on load (v1 `services` → `components`, v2 kept as-is).
 
 ## Config structure
 
 The top-level [`Config` struct](/internal/config/config.go) has these sections:
 
 ```yaml
-version: 2                # 1 or 2 (v1 services are migrated to components)
+version: 3                # 1, 2, or 3 (v1/v2 migrated on load)
 workspace: .              # working directory root
 openwiki: { ... }         # OpenWiki command, args, timeout, environment
-execution: { ... }        # parallelism, retries, repair rounds, failure policy
-documentation: { ... }    # quality thresholds, validation toggles
+execution: { ... }        # parallelism, retries, repair rounds, failure policy, isolation
+documentation: { ... }    # quality thresholds, views, catalogs, evidence config
 mermaid: { ... }          # Mermaid CLI config (render/basic/off mode)
 components: [ ... ]       # component definitions
+documentationUnits: [ ... ] # explicit documentation unit definitions
 system: { ... }           # whole-system aggregation config
 ```
 
@@ -33,6 +34,8 @@ system: { ... }           # whole-system aggregation config
 | `args` | `["--yes", "openwiki@0.2.0", "code"]` | CLI arguments |
 | `modelId` | `""` | Override OpenWiki model ID |
 | `timeoutMinutes` | `60` | Per-phase timeout |
+| `maxCaptureBytes` | `262144` | Maximum bytes captured from OpenWiki stdout/stderr |
+| `logDirectory` | `""` | Optional directory for complete process logs |
 | `environment` | `{OPENWIKI_TELEMETRY_DISABLED: "1", OPENWIKI_PROVIDER_RETRY_ATTEMPTS: "3"}` | Extra env vars |
 
 ### Execution config
@@ -43,6 +46,7 @@ system: { ... }           # whole-system aggregation config
 | `maxProcessRetries` | `2` | Max retries per phase process |
 | `maxRepairRounds` | `2` | Max validation/repair cycles |
 | `continueOnComponentFailure` | `true` | Keep going after component failure |
+| `isolateSameRepository` | `true` | Execute same-repo components in isolated working directories |
 
 ### Documentation config
 
@@ -50,10 +54,20 @@ system: { ... }           # whole-system aggregation config
 |---|---|---|
 | `language` | `English` | Documentation language |
 | `minimumQualityScore` | `85` | Minimum validation score to accept |
+| `minimumPages` | `0` | Minimum pages (0=planner defaults) |
 | `requireFrontMatter` | `true` | Enforce OpenWiki front matter |
 | `requireSourceReferences` | `true` | Enforce source reference sections |
 | `validateSourcePaths` | `true` | Verify source paths resolve in scope |
-| `allowedDiagramTypes` | 9 types | Permitted Mermaid diagram types |
+| `requireMermaid` | `true` | Enforce Mermaid diagrams |
+| `minimumMermaidBlocks` | `0` | Minimum Mermaid blocks (0=planner defaults) |
+| `allowedDiagramTypes` | 8 types | Permitted Mermaid diagram types |
+| `views` | `[]` | Active documentation views |
+| `catalogs` | `{...}` | Catalog sharding and size limits |
+| `evidence` | `{...}` | Evidence index config |
+| `frontMatterPolicy` | `namespaced` | Front matter field policy |
+| `requireVerifiedEvidence` | `true` | Require verified evidence sources |
+| `requireCatalogIdentity` | `true` | Require stable catalog IDs |
+| `requireRelationshipEvidence` | `true` | Require evidence for relationship edges |
 
 ### Mermaid config
 
@@ -63,6 +77,8 @@ system: { ... }           # whole-system aggregation config
 | `command` | `npx` | Mermaid CLI command |
 | `args` | `["--yes", "@mermaid-js/mermaid-cli@11.12.0", "-i", "{input}", "-o", "{output}", "--quiet"]` | Mermaid args with `{input}`/`{output}` placeholders |
 | `timeoutSeconds` | `90` | Per-diagram render timeout |
+| `cacheDirectory` | `""` | Optional Mermaid render cache directory |
+| `maxWorkers` | `2` | Maximum concurrent Mermaid render workers |
 
 ## Component configuration
 
@@ -77,6 +93,9 @@ components:
     dependsOn: [shared-contracts]
     scope: ""                       # empty = repository root
     includeInSystem: true           # default: true
+    owners: [platform-team]         # ownership for adaptive planning
+    capabilities: [order-management]
+    packs: [api, messaging, data]   # capability packs for catalog pages
 ```
 
 ### Component types and profile mapping
@@ -93,40 +112,57 @@ components:
 
 ## Profiles
 
-Seven documentation profiles each define a set of phases with required output files, sections, and diagram types. Profile definitions are in [`internal/prompts/profiles.go`](/internal/prompts/profiles.go).
+Seven documentation profiles classify the component type. Profiles serve as **identity metadata** — they control evidence lens and writing direction but do not prescribe fixed page sets. Profile definitions are in [`internal/prompts/profiles.go`](/internal/prompts/profiles.go).
 
 ### Phase structure
 
-Each phase has:
-- **ID** (e.g., `A10`, `M25`, `I70`)
-- **Name** (e.g., "Architecture", "Domain behaviour")
-- **Output file** (e.g., `architecture/overview.md`)
-- **Objective** — Describes the phase purpose
-- **Required headings** — Exact section headings to include
-- **Required diagram type** — Mermaid diagram contract (`flowchart`, `sequenceDiagram`, `erDiagram`, `classDiagram`, or `any`)
-- **Page contracts** — For specialized catalog phases
+Adaptive page contracts are generated by `AdaptivePageContract()` in [`internal/prompts/adaptive.go`](/internal/prompts/adaptive.go). Each contract includes:
 
-### Phase IDs by profile
+- **Path** — Canonical Markdown file path (e.g., `components/order-service/architecture.md`)
+- **Kind** — Page kind (`single`, `index`, `collection`, `shard`)
+- **Required headings** — Default: `Purpose`, `Knowledge Gaps`, `Source References`; index/collection pages use `Navigation` instead of `Purpose`
+- **Required diagram** — `flowchart` for most pages; empty for index/collection pages
+- **Catalog contracts** — Pages under `catalogs/` require a table header: `| ID | Name | Direction | Owner | Evidence |`
 
-Every profile follows the pattern:
-- `{PREFIX}00` — Bootstrap and quickstart
-- `{PREFIX}10–{PREFIX}70` — Core phases
-- `{PREFIX}S01–{PREFIX}SNN` — Specialized catalog batches (inserted before consolidate)
-- `{PREFIX}C90` — Consolidate/relationship audit
+### Documentation views
 
-Prefixes: A (application), M (modular-application), R (reusable), I (infrastructure), C (configuration), K (contracts), G (generic).
+Pages are organized by view:
+
+| View | Canonical location | Ownership |
+|---|---|---|
+| System | `quickstart.md`, `system/` | Whole-system topology, landscape, cross-component relationships |
+| Domain | `domains/<domain>/` | Business capability, concepts, rules, state, interfaces, events |
+| Component | `components/<component>/` | Runtime boundary, architecture, contracts, data, operations |
+| Flow | `flows/<flow>.md` | Trigger, actor, steps, state changes, events, failure, compensation |
+| Catalog | `catalogs/<catalog>/` | Typed lookup data with stable IDs, direction, ownership, evidence |
+| Platform | `platform/` | Shared messaging, security/identity, container, deployment |
+| Engineering | `engineering/` | Reusable engineering, testing, implementation standards |
+| Operations | `operations/` | Runtime operation, recovery, ownership, failure handling |
+
+Navigation is progressive: root links view indexes, view indexes link unit/collection indexes, collections link leaf pages or shards.
+
+### Page kinds and sharding
+
+| Kind | Behaviour |
+|---|---|
+| `single` | Standalone leaf page with Purpose, Knowledge Gaps, Source References |
+| `index` | Navigation hub for a view or unit (no diagram contract) |
+| `collection` | Catalog collection page with required table header and data rows |
+| `shard` | Partitioned catalog page when rows or bytes exceed thresholds |
+
+Sharding dimensions include: domain, subdomain, bounded-context, component, owner, repository, runtime, transport, data-store, criticality.
 
 ### Profile contracts
 
-| Profile | Core pages | Specialized pages | Total canonical pages | Minimum Mermaid blocks |
-|---|---|---|---|---|
-| `application` | 8 | 22 | 30 | 5 |
-| `modular-application` | 9 | 22 | 31 | 6 |
-| `reusable` | 8 | 19 | 27 | 5 |
-| `infrastructure` | 8 | 15 | 23 | 5 |
-| `configuration` | 8 | 11 | 19 | 5 |
-| `contracts` | 8 | 10 | 18 | 5 |
-| `generic` | 8 | 22 | 30 | 5 |
+| Profile | Description |
+|---|---|
+| `application` | Deployable application (monolith, microservice, worker, gateway, frontend, CLI) |
+| `modular-application` | Modular monolith with module-aware documentation |
+| `reusable` | Library, SDK, framework, shared package |
+| `infrastructure` | IaC, GitOps, platform, deployment |
+| `configuration` | Shared configuration, policy, templates, manifests |
+| `contracts` | API, event, message, data, protocol contracts |
+| `generic` | Language/tech-neutral fallback |
 
 ## Path normalization
 
@@ -151,7 +187,7 @@ The `ComponentConfig.WorkDir()` method returns `{repository}/{scope}` (or just `
 - Mermaid timeout is positive
 - Component IDs are portable path segments (no spaces, special chars, etc.)
 
-## V1 backward compatibility
+## V1/V2 backward compatibility
 
 Configs with `version: 1` or legacy `services` array are migrated:
 - `version: 0` (unset) → treated as v1
@@ -166,6 +202,5 @@ Configs with `version: 1` or legacy `services` array are migrated:
 | `/internal/config/config_test.go` | Config loading and normalization tests |
 | `/schema/wikiforge-config.schema.json` | JSON Schema |
 | `/wikiforge.example.yaml` | Example config with all component types |
-| `/internal/prompts/profiles.go` | All 7 profile definitions with phase contracts |
-| `/internal/prompts/supplements.go` | Specialized catalog page contracts |
+| `/internal/prompts/profiles.go` | All 7 profile identity definitions |
 | `/internal/pathutil/pathutil.go` | Cross-platform path normalization utilities |

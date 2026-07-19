@@ -14,20 +14,23 @@ WikiForge invokes OpenWiki as a child process using the `ExecRunner` defined in 
 
 Large phase prompts (up to ~160 KB) are not passed directly on the command line. Instead:
 
-1. WikiForge writes the complete rendered prompt to a temporary file: `.wikiforge-prompt-<hash>.md` in the component working directory.
+1. WikiForge writes the complete rendered prompt to a temporary file: `.wikiforge-prompt-<hash>.md` in the component's `openwiki/` subdirectory.
 2. A short single-line JSON bridge instruction is passed to OpenWiki through `--print`:
 
 ```
-WIKIFORGE_PROMPT_REF={"path":"C:/absolute/path/.wikiforge-prompt-abc123.md"}
+WIKIFORGE_PROMPT_REF={"path":"/openwiki/.wikiforge-prompt-abc123.md"} This is a non-interactive WikiForge page task. Parse the JSON object after WIKIFORGE_PROMPT_REF, take only its path string value without quotation marks, and immediately use the filesystem read tool to read that exact absolute virtual UTF-8 file. The path is rooted at the repository virtual filesystem and begins with /openwiki/; do not convert it to a host path. Execute every instruction in that file now. Do not ask for clarification, do not search for another specification such as wikiforge.yaml, do not merely summarize the file, and do not modify, document, move, or delete the prompt file.
 ```
 
-3. OpenWiki parses the JSON, reads the exact file at that path, and executes the full specification.
+3. OpenWiki parses the JSON, reads the exact file at the **absolute virtual path** `/openwiki/...` (rooted in the OpenWiki repository virtual filesystem), and executes the full specification.
 4. The temporary file is removed after the process exits (success, failure, timeout, or cancellation).
 
 This approach avoids:
 - Windows `cmd.exe` and `npx.cmd` command-line length limits.
 - Embedded-newline handling differences across shells.
 - Quote and backslash escaping issues.
+- UNC prefix (`\\?\`) conflicts on Windows long paths.
+
+The key change from earlier versions is the switch from host filesystem paths to absolute virtual paths (`/openwiki/...`). This eliminates all host-OS path encoding issues at the cost of requiring OpenWiki's prompt transport to resolve virtual paths to host paths. See `promptHostPath` in [`runner.go`](/internal/openwiki/runner.go) for the reverse mapping logic.
 
 ## Runner interface
 
@@ -72,7 +75,8 @@ All paths crossing the external-tool boundary are normalized by [`internal/pathu
 - Absolute paths use forward slashes on Windows (accepted by Node).
 - Extended-length `\\?\` prefixes are removed before transport.
 - Unicode paths, spaces, symlinks, and junctions are preserved.
-- The `doctor` command runs a prompt-transport preflight for every enabled component.
+- Temporary prompt files are placed inside the component's `openwiki/` directory to ensure the virtual path `/openwiki/...` has a valid host-side counterpart.
+- The `doctor` command runs a prompt-transport preflight (`CheckPromptTransport`) for every enabled component, verifying that the virtual path round-trips correctly.
 
 ## Doctor preflight check
 
@@ -104,6 +108,7 @@ Provider credentials must be set separately as environment variables (e.g., `OPE
 
 | File | Role |
 |---|---|
-| `/internal/openwiki/runner.go` | Runner interface, ExecRunner implementation, prompt externalization |
-| `/internal/openwiki/runner_test.go` | Bridge contract tests (single-line prompt, clarification rejection) |
+| `/internal/openwiki/runner.go` | Runner interface, ExecRunner implementation, prompt externalization with virtual paths |
+| `/internal/openwiki/runner_test.go` | Bridge contract tests (single-line prompt, clarification rejection, prompt transport) |
 | `/internal/pathutil/pathutil.go` | Cross-platform path normalization for external tool boundaries |
+| `/internal/pathutil/pathutil_test.go` | Path normalization tests |

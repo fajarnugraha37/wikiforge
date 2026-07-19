@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/fajarnugraha37/wikiforge/internal/evidence"
 )
 
 type Node struct {
@@ -29,8 +31,19 @@ type Edge struct {
 }
 
 var mdLinkRE = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+\.md(?:#[^)]+)?)\)`)
+var controlledRelationships = map[string]bool{
+	"AUTHORIZES": true, "CALLS": true, "CONSUMES": true, "DEPENDS_ON": true,
+	"EXPOSES": true, "EXTENDS": true, "IMPLEMENTS": true, "IMPORTS": true,
+	"LINKS_TO": true, "OWNS": true, "PART_OF": true, "PERSISTS": true,
+	"PRODUCES": true, "REFERENCES": true, "RELATED_TO": true, "VALIDATES": true,
+	"SUPPORTED_BY": true,
+}
 
 func Export(targetID, docsRoot, outputRoot string) error {
+	return ExportWithEvidence(targetID, docsRoot, outputRoot, evidence.Index{})
+}
+
+func ExportWithEvidence(targetID, docsRoot, outputRoot string, index evidence.Index) error {
 	var files []string
 	if err := filepath.WalkDir(docsRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -51,10 +64,10 @@ func Export(targetID, docsRoot, outputRoot string) error {
 	for _, path := range files {
 		rel, _ := filepath.Rel(docsRoot, path)
 		rel = filepath.ToSlash(rel)
-		id := targetID + ":doc:" + strings.TrimSuffix(rel, ".md")
+		id := targetID + ":path:" + canonicalPath(rel)
 		idByPath[filepath.Clean(path)] = id
 		content, _ := os.ReadFile(path)
-		nodes = append(nodes, Node{ID: id, Type: "Document", Title: documentTitle(string(content), rel), Source: rel})
+		nodes = append(nodes, Node{ID: id, Type: documentType(string(content)), Title: documentTitle(string(content), rel), Source: rel})
 	}
 	for _, path := range files {
 		contentBytes, _ := os.ReadFile(path)
@@ -65,12 +78,29 @@ func Export(targetID, docsRoot, outputRoot string) error {
 		for _, m := range mdLinkRE.FindAllStringSubmatch(content, -1) {
 			targetPart := strings.Split(m[2], "#")[0]
 			resolved := filepath.Clean(filepath.Join(filepath.Dir(path), filepath.FromSlash(targetPart)))
+			if strings.HasPrefix(targetPart, "/") {
+				resolved = filepath.Clean(filepath.Join(docsRoot, filepath.FromSlash(strings.TrimPrefix(targetPart, "/"))))
+			}
 			to, ok := idByPath[resolved]
 			if ok {
 				edges = append(edges, Edge{From: from, Relationship: "LINKS_TO", To: to, Source: rel})
 			}
 		}
-		edges = append(edges, relationshipTableEdges(targetID, rel, content)...)
+		edges = append(edges, relationshipTableEdges(rel, content)...)
+	}
+	knownEvidence := map[string]evidence.EvidenceReference{}
+	for _, ref := range index.References {
+		knownEvidence[ref.ID] = ref
+		nodes = append(nodes, Node{ID: ref.ID, Type: "Evidence", Title: ref.Path, Source: ref.Path})
+	}
+	for _, dependency := range index.Dependencies {
+		from := targetID + ":path:" + canonicalPath(dependency.PageID)
+		if _, ok := idByPath[filepath.Join(docsRoot, filepath.FromSlash(dependency.PageID+".md"))]; !ok {
+			from = targetID + ":path:" + canonicalPath(dependency.PageID)
+		}
+		if _, ok := knownEvidence[dependency.EvidenceID]; ok {
+			edges = append(edges, Edge{From: from, Relationship: "SUPPORTED_BY", To: dependency.EvidenceID, Source: dependency.SectionID})
+		}
 	}
 	known := map[string]bool{}
 	for _, n := range nodes {
@@ -80,8 +110,8 @@ func Export(targetID, docsRoot, outputRoot string) error {
 		for _, id := range []string{e.From, e.To} {
 			if !known[id] {
 				title := id
-				if idx := strings.LastIndex(id, ":concept:"); idx >= 0 {
-					title = strings.ReplaceAll(id[idx+9:], "-", " ")
+				if strings.HasPrefix(id, "concept:") {
+					title = strings.ReplaceAll(strings.TrimPrefix(id, "concept:"), "-", " ")
 				}
 				nodes = append(nodes, Node{ID: id, Type: "Concept", Title: title, Source: e.Source})
 				known[id] = true
@@ -111,7 +141,30 @@ func documentTitle(content, fallback string) string {
 	return fallback
 }
 
-func relationshipTableEdges(targetID, source, content string) []Edge {
+func documentType(content string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
+		for _, line := range lines[1:] {
+			if strings.TrimSpace(line) == "---" {
+				break
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "type:") {
+				value := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "type:"))
+				if value != "" {
+					return value
+				}
+			}
+		}
+	}
+	return "Document"
+}
+
+func canonicalPath(path string) string {
+	path = filepath.ToSlash(filepath.Clean(path))
+	return strings.TrimSuffix(path, filepath.Ext(path))
+}
+
+func relationshipTableEdges(source, content string) []Edge {
 	var edges []Edge
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	inTable := false
@@ -132,9 +185,13 @@ func relationshipTableEdges(targetID, source, content string) []Edge {
 		if len(cells) < 3 || isSeparator(cells[0]) {
 			continue
 		}
-		from := targetID + ":concept:" + slug(cells[0])
-		to := targetID + ":concept:" + slug(cells[2])
-		edge := Edge{From: from, Relationship: strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(cells[1]), " ", "_")), To: to, Source: source}
+		from := "concept:" + conceptIdentity(cells[0])
+		to := "concept:" + conceptIdentity(cells[2])
+		relationship := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(cells[1]), " ", "_"))
+		if !controlledRelationships[relationship] {
+			relationship = "RELATED_TO"
+		}
+		edge := Edge{From: from, Relationship: relationship, To: to, Source: source}
 		if len(cells) > 3 {
 			edge.Evidence = cells[3]
 		}
@@ -147,6 +204,22 @@ func relationshipTableEdges(targetID, source, content string) []Edge {
 		edges = append(edges, edge)
 	}
 	return edges
+}
+
+func conceptIdentity(value string) string {
+	value = strings.TrimSpace(value)
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"concept id:", "concept_id:", "id:"} {
+		if strings.HasPrefix(lower, prefix) {
+			return slug(strings.TrimSpace(value[len(prefix):]))
+		}
+	}
+	if strings.HasPrefix(value, "[") {
+		if close := strings.Index(value, "]("); close >= 0 {
+			value = value[1:close]
+		}
+	}
+	return slug(value)
 }
 
 func splitTableRow(line string) []string {

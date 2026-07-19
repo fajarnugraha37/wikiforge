@@ -8,7 +8,7 @@ resource: /internal/validation/validation.go
 
 # Testing and Validation
 
-WikiForge has a comprehensive testing and validation system covering unit tests, contract tests for every documentation profile, end-to-end orchestration tests, and a validation engine that checks generated documentation quality.
+WikiForge has a comprehensive testing and validation system covering unit tests, contract tests for adaptive documentation profiles, end-to-end orchestration tests, an adaptive validation engine that checks generated documentation quality, and evidence-backed validation.
 
 ## Test pyramid
 
@@ -16,45 +16,48 @@ WikiForge has a comprehensive testing and validation system covering unit tests,
 
 | Package | Test file | Coverage |
 |---|---|---|
-| `config` | `config_test.go` | Config loading, normalization, v1→v2 migration |
+| `config` | `config_test.go` | Config loading, normalization, v1→v2→v3 migration |
 | `pathutil` | `pathutil_test.go` | Cross-platform path normalization |
-| `prompts` | `supplements_test.go` | Supplement contract rendering |
-| `validation` | `validation_test.go` | Validation rules, front matter, Mermaid |
+| `prompts` | `adaptive_test.go` | Adaptive page contracts and rendering |
+| `evidence` | `evidence_test.go` | Evidence index, change detection, impact |
+| `graph` | `graph_test.go` | Knowledge graph export |
+| `validation` | `validation_test.go` | Validation rules, front matter, Mermaid, adaptive |
 | `orchestrator` | `orchestrator_test.go` | Full pipeline with fake runner |
+| `orchestrator` | `adaptive_test.go` | Adaptive component and system execution |
 | `orchestrator` | `progress_test.go` | Progress bar display |
-| `openwiki` | `runner_test.go` | Bridge contract, semantic failure detection |
+| `openwiki` | `runner_test.go` | Bridge contract, semantic failure detection, prompt transport |
+| `benchmark` | `benchmark_test.go` | Phase 4 benchmark tests |
 
 ### Contract tests
 
-The validation package includes `TestEveryProfileCanSatisfyItsContract` — for each of the 7 profiles, it:
+The validation package includes adaptive contract tests that verify each profile can satisfy its adaptive page contract. Tests ensure:
 
-1. Generates a fixture wiki with all required pages and sections.
-2. Validates the fixture against that profile's contract.
-3. Asserts the result is accepted.
-
-This ensures profile contracts remain internally consistent as profiles evolve.
+- Profile identity metadata is valid.
+- Adaptive page contracts are internally consistent.
+- Hierarchical page structure validates correctly.
 
 ### End-to-end orchestration tests
 
-`TestGenerateAllProfilesMonorepoAndSystemEndToEnd` exercises the full pipeline:
+`internal/orchestrator/orchestrator_test.go` and `adaptive_test.go` exercise the full pipeline:
 
-- 7 components across 2 repositories (one monorepo, one standalone)
-- All 7 profiles (application, modular-application, reusable, infrastructure, configuration, contracts, generic)
-- Monorepo serialization verification (same-repo components never run concurrently)
-- Whole-system aggregation
-- `fakeRunner` simulates OpenWiki without model calls
+- Adaptive discovery, planning, and page generation.
+- All 7 profiles with adaptive execution.
+- Monorepo serialization verification (same-repo components never run concurrently).
+- Whole-system aggregation with content-addressed snapshots.
+- `fakeRunner` simulates OpenWiki without model calls.
 
 Additional tests cover:
-- `TestSameRepositoryComponentsAreSerialized` — Verifies serialization within a repo
-- Call counting and phase completion tracking
+- `TestSameRepositoryComponentsAreSerialized` — Verifies serialization within a repo.
+- `TestAdaptiveComponent` — Adaptive discovery, planning, and page execution.
+- Call counting and phase completion tracking.
 
 ## Validation engine
 
-[`internal/validation/validation.go`](/internal/validation/validation.go) provides the `Validator` with two methods:
+[`internal/validation/validation.go`](/internal/validation/validation.go) provides the `Validator` with adaptive validation methods:
 
 ```go
-func (v Validator) ValidateComponent(ctx context.Context, component config.ComponentConfig) model.ValidationResult
-func (v Validator) ValidateSystem(ctx context.Context) model.ValidationResult
+func (v Validator) ValidateAdaptiveComponent(ctx context.Context, component config.ComponentConfig, plan planner.ComponentPlan) model.ValidationResult
+func (v Validator) ValidateAdaptiveSystem(ctx context.Context, root string, plan planner.SystemPlan) model.ValidationResult
 ```
 
 ### Validation rules
@@ -75,6 +78,15 @@ func (v Validator) ValidateSystem(ctx context.Context) model.ValidationResult
 | `DOC-EMPTY-SECTION` | error | Required section is empty |
 | `DOC-REQUIRED-TABLE` | error | Required catalog table header not found |
 | `DOC-CATALOG-EMPTY` | error | Catalog table has no data rows |
+| `DOC-CATALOG-IDENTITY` | error | Catalog entries missing stable identity (from evidence) |
+| `DOC-CATALOG-BOUNDS` | error | Catalog exceeds configured row or byte bounds |
+| `DOC-RELATIONSHIP-VOCABULARY` | error | Relationship vocabulary not aligned with plan |
+| `DOC-NAV-STRUCTURE` | error | Navigation hierarchy contradicts planned page tree |
+| `DOC-DUPLICATE-CONCEPT` | warning | Concept appears under multiple owners without explanation |
+| `DOC-ABSOLUTE-LINK` | error | Link uses absolute host path instead of relative |
+| `DOC-EVIDENCE-UNAVAILABLE` | warning | Claim lacks backed evidence |
+| `DOC-SECRET-LEAK` | error | Possible credential or private key detected |
+| `DOC-HIERARCHY` | error | Page hierarchy mismatch (index/collection/shard structure) |
 | `MERMAID-TYPE` | error | Unsupported or missing diagram type |
 | `MERMAID-BASIC` | error | Basic Mermaid syntax error |
 | `MERMAID-RENDER` | error | Mermaid CLI rendering failure |
@@ -131,13 +143,14 @@ go test ./internal/orchestrator/... -run TestGenerate
 
 ## Change guidance
 
-When modifying validation rules or profiles:
+When modifying validation rules or adaptive profiles:
 
 1. Update `validation.go` and `validation_test.go` for new rules.
-2. Update `TestEveryProfileCanSatisfyItsContract` if profile contracts change.
-3. Update `orchestrator_test.go` if phase IDs or pipeline structure changes.
-4. Run the full test suite to verify no regressions.
-5. Update `BUILD-VERIFICATION.md` for significant validation additions.
+2. Update adaptive contract tests in `validation_test.go` if profile contracts change.
+3. Update `orchestrator/adaptive_test.go` and `orchestrator/orchestrator_test.go` if pipeline structure changes.
+4. Update `evidence/evidence.go` and `evidence_test.go` if evidence-index rules change.
+5. Run the full test suite to verify no regressions.
+6. Update `BUILD-VERIFICATION.md` for significant validation additions.
 
 ## Source map
 
@@ -145,9 +158,12 @@ When modifying validation rules or profiles:
 |---|---|
 | `/internal/validation/validation.go` | Validation engine with all rules |
 | `/internal/validation/validation_test.go` | Contract tests and edge-case tests |
+| `/internal/evidence/evidence.go` | Evidence index and coverage |
+| `/internal/evidence/evidence_test.go` | Evidence index tests |
 | `/internal/orchestrator/orchestrator_test.go` | End-to-end pipeline tests |
+| `/internal/orchestrator/adaptive_test.go` | Adaptive execution tests |
 | `/internal/openwiki/runner_test.go` | Bridge and runner contract tests |
 | `/internal/pathutil/pathutil_test.go` | Cross-platform path tests |
-| `/internal/prompts/supplements_test.go` | Supplement contract tests |
+| `/internal/prompts/adaptive_test.go` | Adaptive page contract tests |
 | `/internal/config/config_test.go` | Config loading tests |
 | `/internal/orchestrator/progress_test.go` | Progress bar tests |

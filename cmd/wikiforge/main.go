@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/example/wikiforge/internal/app"
+	"github.com/fajarnugraha37/wikiforge/internal/app"
 	"os"
 )
 

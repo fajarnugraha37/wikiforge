@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,52 +10,86 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/example/wikiforge/internal/pathutil"
+	"github.com/fajarnugraha37/wikiforge/internal/pathutil"
 )
 
-const CurrentVersion = 2
+const CurrentVersion = 4
 
 type Config struct {
-	Version       int                 `json:"version"`
-	Workspace     string              `json:"workspace"`
-	OpenWiki      OpenWikiConfig      `json:"openwiki"`
-	Execution     ExecutionConfig     `json:"execution"`
-	Documentation DocumentationConfig `json:"documentation"`
-	Mermaid       MermaidConfig       `json:"mermaid"`
-	Components    []ComponentConfig   `json:"components"`
-	// Services is retained only for backward compatibility with v1 configurations.
-	// Each legacy service is normalized into a component of type microservice.
-	Services []ServiceConfig `json:"services"`
-	System   SystemConfig    `json:"system"`
+	Version            int                       `json:"version"`
+	Workspace          string                    `json:"workspace"`
+	OpenWiki           OpenWikiConfig            `json:"openwiki"`
+	Execution          ExecutionConfig           `json:"execution"`
+	Documentation      DocumentationConfig       `json:"documentation"`
+	Mermaid            MermaidConfig             `json:"mermaid"`
+	Components         []ComponentConfig         `json:"components"`
+	DocumentationUnits []DocumentationUnitConfig `json:"documentationUnits"`
+	System             SystemConfig              `json:"system"`
 }
 
 type OpenWikiConfig struct {
-	Command        string            `json:"command"`
-	Args           []string          `json:"args"`
-	ModelID        string            `json:"modelId"`
-	TimeoutMinutes int               `json:"timeoutMinutes"`
-	Environment    map[string]string `json:"environment"`
+	Command         string            `json:"command"`
+	Args            []string          `json:"args"`
+	ModelID         string            `json:"modelId"`
+	TimeoutMinutes  int               `json:"timeoutMinutes"`
+	MaxCaptureBytes int               `json:"maxCaptureBytes"`
+	LogDirectory    string            `json:"logDirectory"`
+	Environment     map[string]string `json:"environment"`
 }
 
 type ExecutionConfig struct {
 	ParallelComponents         int  `json:"parallelComponents"`
-	ParallelServices           int  `json:"parallelServices"` // legacy alias
 	MaxProcessRetries          int  `json:"maxProcessRetries"`
 	MaxRepairRounds            int  `json:"maxRepairRounds"`
 	ContinueOnComponentFailure bool `json:"continueOnComponentFailure"`
-	ContinueOnServiceFailure   bool `json:"continueOnServiceFailure"` // legacy alias
+	IsolateSameRepository      bool `json:"isolateSameRepository"`
 }
 
 type DocumentationConfig struct {
-	Language                string   `json:"language"`
-	MinimumQualityScore     int      `json:"minimumQualityScore"`
-	MinimumPages            int      `json:"minimumPages"`
-	RequireFrontMatter      bool     `json:"requireFrontMatter"`
-	RequireSourceReferences bool     `json:"requireSourceReferences"`
-	ValidateSourcePaths     bool     `json:"validateSourcePaths"`
-	RequireMermaid          bool     `json:"requireMermaid"`
-	MinimumMermaidBlocks    int      `json:"minimumMermaidBlocks"`
-	AllowedDiagramTypes     []string `json:"allowedDiagramTypes"`
+	Language                    string          `json:"language"`
+	MinimumQualityScore         int             `json:"minimumQualityScore"`
+	MinimumPages                int             `json:"minimumPages"`
+	RequireFrontMatter          bool            `json:"requireFrontMatter"`
+	RequireSourceReferences     bool            `json:"requireSourceReferences"`
+	ValidateSourcePaths         bool            `json:"validateSourcePaths"`
+	RequireMermaid              bool            `json:"requireMermaid"`
+	MinimumMermaidBlocks        int             `json:"minimumMermaidBlocks"`
+	AllowedDiagramTypes         []string        `json:"allowedDiagramTypes"`
+	Views                       []string        `json:"views"`
+	Catalogs                    CatalogsConfig  `json:"catalogs"`
+	Evidence                    EvidenceConfig  `json:"evidence"`
+	FrontMatterPolicy           string          `json:"frontMatterPolicy"`
+	RequireVerifiedEvidence     bool            `json:"requireVerifiedEvidence"`
+	RequireCatalogIdentity      bool            `json:"requireCatalogIdentity"`
+	RequireRelationshipEvidence bool            `json:"requireRelationshipEvidence"`
+	Discovery                   DiscoveryConfig `json:"discovery"`
+}
+
+type CatalogsConfig struct {
+	ShardBy []string `json:"shardBy"`
+}
+
+type DiscoveryConfig struct {
+	Mode       string         `json:"mode"`
+	Required   bool           `json:"required"`
+	ReuseCache bool           `json:"reuseCache"`
+	OnConflict ConflictConfig `json:"onConflict"`
+}
+
+type ConflictConfig struct {
+	DomainIdentity  string `json:"domainIdentity"`
+	SourceOwnership string `json:"sourceOwnership"`
+	ModuleRole      string `json:"moduleRole"`
+	Ownership       string `json:"ownership"`
+	Criticality     string `json:"criticality"`
+	Relationships   string `json:"relationships"`
+}
+
+type EvidenceConfig struct {
+	Include        []string `json:"include"`
+	Exclude        []string `json:"exclude"`
+	CacheDirectory string   `json:"cacheDirectory"`
+	MaxFileBytes   int64    `json:"maxFileBytes"`
 }
 
 type MermaidConfig struct {
@@ -62,6 +97,8 @@ type MermaidConfig struct {
 	Command        string   `json:"command"`
 	Args           []string `json:"args"`
 	TimeoutSeconds int      `json:"timeoutSeconds"`
+	CacheDirectory string   `json:"cacheDirectory"`
+	MaxWorkers     int      `json:"maxWorkers"`
 }
 
 type ComponentConfig struct {
@@ -70,19 +107,32 @@ type ComponentConfig struct {
 	Profile         string   `json:"profile"`
 	Repository      string   `json:"repository"`
 	Scope           string   `json:"scope"`
-	Path            string   `json:"path"` // accepted alias for repository or scoped path
 	Enabled         bool     `json:"enabled"`
 	IncludeInSystem *bool    `json:"includeInSystem"`
 	Group           string   `json:"group"`
 	Tags            []string `json:"tags"`
 	DependsOn       []string `json:"dependsOn"`
+	Owners          []string `json:"owners"`
+	Capabilities    []string `json:"capabilities"`
+	Packs           []string `json:"packs"`
 }
 
-// ServiceConfig is the legacy v1 shape.
-type ServiceConfig struct {
-	ID      string `json:"id"`
-	Path    string `json:"path"`
-	Enabled bool   `json:"enabled"`
+type DocumentationUnitConfig struct {
+	ID             string   `json:"id"`
+	Component      string   `json:"component"`
+	Kind           string   `json:"kind"`
+	SourceRoots    []string `json:"sourceRoots"`
+	RelatedUnits   []string `json:"relatedUnits"`
+	Output         string   `json:"output"`
+	Owners         []string `json:"owners"`
+	Capabilities   []string `json:"capabilities"`
+	Criticality    string   `json:"criticality"`
+	Domain         string   `json:"domain"`
+	Subdomain      string   `json:"subdomain"`
+	BoundedContext string   `json:"boundedContext"`
+	View           string   `json:"view"`
+	EvidenceRoots  []string `json:"evidenceRoots"`
+	ShardBy        []string `json:"shardBy"`
 }
 
 type SystemConfig struct {
@@ -99,9 +149,10 @@ func Defaults() Config {
 		Version:   CurrentVersion,
 		Workspace: ".",
 		OpenWiki: OpenWikiConfig{
-			Command:        "npx",
-			Args:           []string{"--yes", "openwiki@0.2.0", "code"},
-			TimeoutMinutes: 60,
+			Command:         "npx",
+			Args:            []string{"--yes", "openwiki@0.2.0", "code"},
+			TimeoutMinutes:  60,
+			MaxCaptureBytes: 256 * 1024,
 			Environment: map[string]string{
 				"OPENWIKI_TELEMETRY_DISABLED":      "1",
 				"OPENWIKI_PROVIDER_RETRY_ATTEMPTS": "3",
@@ -112,23 +163,35 @@ func Defaults() Config {
 			MaxProcessRetries:          2,
 			MaxRepairRounds:            2,
 			ContinueOnComponentFailure: true,
+			IsolateSameRepository:      true,
 		},
 		Documentation: DocumentationConfig{
-			Language:                "English",
-			MinimumQualityScore:     85,
-			MinimumPages:            0, // zero means use the selected profile contract
-			RequireFrontMatter:      true,
-			RequireSourceReferences: true,
-			ValidateSourcePaths:     true,
-			RequireMermaid:          true,
-			MinimumMermaidBlocks:    0, // zero means use the selected profile contract
-			AllowedDiagramTypes:     []string{"flowchart", "sequenceDiagram", "stateDiagram-v2", "erDiagram", "classDiagram", "architecture-beta", "gitGraph", "mindmap"},
+			Language:                    "English",
+			MinimumQualityScore:         85,
+			MinimumPages:                0, // zero means use planner defaults
+			RequireFrontMatter:          true,
+			RequireSourceReferences:     true,
+			ValidateSourcePaths:         true,
+			RequireMermaid:              true,
+			MinimumMermaidBlocks:        0, // zero means use planner defaults
+			AllowedDiagramTypes:         []string{"flowchart", "sequenceDiagram", "stateDiagram-v2", "erDiagram", "classDiagram", "architecture-beta", "gitGraph", "mindmap"},
+			FrontMatterPolicy:           "namespaced",
+			RequireVerifiedEvidence:     true,
+			RequireCatalogIdentity:      true,
+			RequireRelationshipEvidence: true,
+			Discovery: DiscoveryConfig{Mode: "hybrid", Required: true, ReuseCache: true, OnConflict: ConflictConfig{
+				DomainIdentity: "fail", SourceOwnership: "fail", ModuleRole: "retain", Ownership: "retain", Criticality: "retain", Relationships: "retain",
+			}},
+			Evidence: EvidenceConfig{
+				MaxFileBytes: 4 * 1024 * 1024,
+			},
 		},
 		Mermaid: MermaidConfig{
 			Mode:           "render",
 			Command:        "npx",
 			Args:           []string{"--yes", "@mermaid-js/mermaid-cli@11.12.0", "-i", "{input}", "-o", "{output}", "--quiet"},
 			TimeoutSeconds: 90,
+			MaxWorkers:     2,
 		},
 		System: SystemConfig{Enabled: true, ID: "enterprise-system", Title: "Enterprise System", Output: "./enterprise-wiki", FactsPath: "./facts"},
 	}
@@ -155,7 +218,16 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := json.Unmarshal(jb, &cfg); err != nil {
+	root, ok := raw.(map[string]any)
+	if !ok {
+		return cfg, errors.New("configuration root must be an object")
+	}
+	if _, ok := root["version"]; !ok {
+		return cfg, errors.New("version is required and must be 4")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(jb))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("decode config: %w", err)
 	}
 	base, err := filepath.Abs(filepath.Dir(path))
@@ -169,10 +241,14 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("workspace path: %w", err)
 	}
-	normalizeLegacy(&cfg)
 	for i := range cfg.Components {
 		if err := normalizeComponent(base, &cfg.Components[i]); err != nil {
 			return cfg, fmt.Errorf("component %q paths: %w", cfg.Components[i].ID, err)
+		}
+	}
+	for i := range cfg.DocumentationUnits {
+		if err := normalizeDocumentationUnit(&cfg.DocumentationUnits[i]); err != nil {
+			return cfg, fmt.Errorf("documentationUnits[%d]: %w", i, err)
 		}
 	}
 	cfg.System.Output, err = pathutil.Resolve(base, cfg.System.Output)
@@ -185,22 +261,26 @@ func Load(path string) (Config, error) {
 			return cfg, fmt.Errorf("system.factsPath: %w", err)
 		}
 	}
+	if cfg.OpenWiki.LogDirectory != "" {
+		cfg.OpenWiki.LogDirectory, err = pathutil.Resolve(base, cfg.OpenWiki.LogDirectory)
+		if err != nil {
+			return cfg, fmt.Errorf("openwiki.logDirectory path: %w", err)
+		}
+	}
+	if cfg.Mermaid.CacheDirectory != "" {
+		cfg.Mermaid.CacheDirectory, err = pathutil.Resolve(base, cfg.Mermaid.CacheDirectory)
+		if err != nil {
+			return cfg, fmt.Errorf("mermaid.cacheDirectory path: %w", err)
+		}
+	}
+	if cfg.Documentation.Evidence.CacheDirectory != "" {
+		cfg.Documentation.Evidence.CacheDirectory, err = pathutil.Resolve(base, cfg.Documentation.Evidence.CacheDirectory)
+		if err != nil {
+			return cfg, fmt.Errorf("documentation.evidence.cacheDirectory path: %w", err)
+		}
+	}
 	applyDefaults(&cfg)
 	return cfg, Validate(cfg)
-}
-
-func normalizeLegacy(c *Config) {
-	if c.Version == 0 {
-		c.Version = 1
-	}
-	for _, s := range c.Services {
-		c.Components = append(c.Components, ComponentConfig{
-			ID:         s.ID,
-			Type:       "microservice",
-			Repository: s.Path,
-			Enabled:    s.Enabled,
-		})
-	}
 }
 
 func normalizeComponent(base string, c *ComponentConfig) error {
@@ -212,14 +292,10 @@ func normalizeComponent(base string, c *ComponentConfig) error {
 		return fmt.Errorf("scope: %w", err)
 	}
 	c.Scope = normalizedScope
-	if c.Repository == "" {
-		c.Repository = c.Path
-	}
 	c.Repository, err = pathutil.Resolve(base, c.Repository)
 	if err != nil {
 		return fmt.Errorf("repository: %w", err)
 	}
-	c.Path = "" // prevent ambiguous use after normalization
 	if c.Type == "" {
 		c.Type = "generic"
 	}
@@ -232,14 +308,62 @@ func normalizeComponent(base string, c *ComponentConfig) error {
 	}
 	sort.Strings(c.Tags)
 	sort.Strings(c.DependsOn)
+	sort.Strings(c.Owners)
+	sort.Strings(c.Capabilities)
+	for i := range c.Packs {
+		c.Packs[i] = normalizeType(c.Packs[i])
+	}
+	sort.Strings(c.Packs)
+	return nil
+}
+
+func normalizeDocumentationUnit(unit *DocumentationUnitConfig) error {
+	unit.ID = strings.TrimSpace(unit.ID)
+	unit.Component = strings.TrimSpace(unit.Component)
+	unit.Kind = normalizeType(unit.Kind)
+	for i := range unit.SourceRoots {
+		normalized, err := pathutil.NormalizeRelative(unit.SourceRoots[i])
+		if err != nil {
+			return fmt.Errorf("sourceRoots[%d]: %w", i, err)
+		}
+		unit.SourceRoots[i] = filepath.ToSlash(normalized)
+	}
+	for i := range unit.RelatedUnits {
+		unit.RelatedUnits[i] = strings.TrimSpace(unit.RelatedUnits[i])
+	}
+	if unit.Output != "" {
+		normalized, err := pathutil.NormalizeRelative(unit.Output)
+		if err != nil {
+			return fmt.Errorf("output: %w", err)
+		}
+		unit.Output = filepath.ToSlash(normalized)
+	}
+	unit.Criticality = strings.TrimSpace(strings.ToLower(unit.Criticality))
+	unit.Domain = strings.TrimSpace(unit.Domain)
+	unit.Subdomain = strings.TrimSpace(unit.Subdomain)
+	unit.BoundedContext = strings.TrimSpace(unit.BoundedContext)
+	unit.View = strings.TrimSpace(strings.ToLower(unit.View))
+	for i := range unit.EvidenceRoots {
+		normalized, err := pathutil.NormalizeRelative(unit.EvidenceRoots[i])
+		if err != nil {
+			return fmt.Errorf("evidenceRoots[%d]: %w", i, err)
+		}
+		unit.EvidenceRoots[i] = filepath.ToSlash(normalized)
+	}
+	for i := range unit.ShardBy {
+		unit.ShardBy[i] = strings.TrimSpace(strings.ToLower(unit.ShardBy[i]))
+	}
+	sort.Strings(unit.SourceRoots)
+	sort.Strings(unit.RelatedUnits)
+	sort.Strings(unit.Owners)
+	sort.Strings(unit.Capabilities)
+	sort.Strings(unit.EvidenceRoots)
+	sort.Strings(unit.ShardBy)
 	return nil
 }
 
 func applyDefaults(c *Config) {
 	d := Defaults()
-	if c.Version == 0 {
-		c.Version = CurrentVersion
-	}
 	if c.OpenWiki.Command == "" {
 		c.OpenWiki.Command = d.OpenWiki.Command
 	}
@@ -249,18 +373,14 @@ func applyDefaults(c *Config) {
 	if c.OpenWiki.TimeoutMinutes <= 0 {
 		c.OpenWiki.TimeoutMinutes = d.OpenWiki.TimeoutMinutes
 	}
+	if c.OpenWiki.MaxCaptureBytes <= 0 {
+		c.OpenWiki.MaxCaptureBytes = d.OpenWiki.MaxCaptureBytes
+	}
 	if c.OpenWiki.Environment == nil {
 		c.OpenWiki.Environment = d.OpenWiki.Environment
 	}
 	if c.Execution.ParallelComponents <= 0 {
-		if c.Execution.ParallelServices > 0 {
-			c.Execution.ParallelComponents = c.Execution.ParallelServices
-		} else {
-			c.Execution.ParallelComponents = d.Execution.ParallelComponents
-		}
-	}
-	if !c.Execution.ContinueOnComponentFailure && c.Execution.ContinueOnServiceFailure {
-		c.Execution.ContinueOnComponentFailure = true
+		c.Execution.ParallelComponents = d.Execution.ParallelComponents
 	}
 	if c.Execution.MaxProcessRetries < 0 {
 		c.Execution.MaxProcessRetries = 0
@@ -277,6 +397,18 @@ func applyDefaults(c *Config) {
 	if len(c.Documentation.AllowedDiagramTypes) == 0 {
 		c.Documentation.AllowedDiagramTypes = d.Documentation.AllowedDiagramTypes
 	}
+	if c.Documentation.FrontMatterPolicy == "" {
+		c.Documentation.FrontMatterPolicy = d.Documentation.FrontMatterPolicy
+	}
+	if c.Documentation.Evidence.MaxFileBytes <= 0 {
+		c.Documentation.Evidence.MaxFileBytes = d.Documentation.Evidence.MaxFileBytes
+	}
+	if c.Documentation.Evidence.CacheDirectory == "" {
+		c.Documentation.Evidence.CacheDirectory = filepath.Join(c.Workspace, ".wikiforge", "cache", "evidence")
+	}
+	if c.Documentation.Discovery.Mode == "" {
+		c.Documentation.Discovery = d.Documentation.Discovery
+	}
 	if c.Mermaid.Mode == "" {
 		c.Mermaid.Mode = d.Mermaid.Mode
 	}
@@ -289,6 +421,12 @@ func applyDefaults(c *Config) {
 	if c.Mermaid.TimeoutSeconds <= 0 {
 		c.Mermaid.TimeoutSeconds = d.Mermaid.TimeoutSeconds
 	}
+	if c.Mermaid.MaxWorkers <= 0 {
+		c.Mermaid.MaxWorkers = d.Mermaid.MaxWorkers
+	}
+	if c.Mermaid.CacheDirectory == "" {
+		c.Mermaid.CacheDirectory = filepath.Join(c.Workspace, ".wikiforge", "cache", "mermaid")
+	}
 	if c.System.ID == "" {
 		c.System.ID = d.System.ID
 	}
@@ -298,11 +436,50 @@ func applyDefaults(c *Config) {
 }
 
 func Validate(c Config) error {
-	if c.Version != 1 && c.Version != CurrentVersion {
-		return fmt.Errorf("unsupported config version %d; supported versions are 1 and %d", c.Version, CurrentVersion)
+	if c.Version != CurrentVersion {
+		return fmt.Errorf("unsupported config version %d; only version %d is supported", c.Version, CurrentVersion)
 	}
 	if c.OpenWiki.Command == "" {
 		return errors.New("openwiki.command is required")
+	}
+	if c.Documentation.Discovery.Mode != "hybrid" && c.Documentation.Discovery.Mode != "explicit" && c.Documentation.Discovery.Mode != "disabled" {
+		return errors.New("documentation.discovery.mode must be hybrid, explicit, or disabled")
+	}
+	if c.Documentation.Discovery.Required && c.Documentation.Discovery.Mode == "disabled" {
+		for _, component := range c.EnabledComponents() {
+			if component.Profile == "modular-application" {
+				return fmt.Errorf("disabled discovery cannot satisfy required discovery for modular component %q", component.ID)
+			}
+		}
+	}
+	if c.Documentation.Discovery.Required && c.Documentation.Discovery.Mode == "explicit" && len(c.DocumentationUnits) == 0 {
+		return errors.New("documentation.discovery.required with explicit mode requires documentationUnits")
+	}
+	if c.Documentation.Discovery.OnConflict.DomainIdentity == "" {
+		return errors.New("documentation.discovery.onConflict.domainIdentity is required")
+	}
+	for name, value := range map[string]string{
+		"domainIdentity":  c.Documentation.Discovery.OnConflict.DomainIdentity,
+		"sourceOwnership": c.Documentation.Discovery.OnConflict.SourceOwnership,
+		"moduleRole":      c.Documentation.Discovery.OnConflict.ModuleRole,
+		"ownership":       c.Documentation.Discovery.OnConflict.Ownership,
+		"criticality":     c.Documentation.Discovery.OnConflict.Criticality,
+		"relationships":   c.Documentation.Discovery.OnConflict.Relationships,
+	} {
+		if value != "fail" && value != "retain" {
+			return fmt.Errorf("documentation.discovery.onConflict.%s must be fail or retain", name)
+		}
+	}
+	if c.Documentation.FrontMatterPolicy != "" && c.Documentation.FrontMatterPolicy != "strict" && c.Documentation.FrontMatterPolicy != "namespaced" {
+		return errors.New("documentation.frontMatterPolicy must be strict or namespaced")
+	}
+	if c.Documentation.Evidence.MaxFileBytes < 0 {
+		return errors.New("documentation.evidence.maxFileBytes must not be negative")
+	}
+	for _, view := range c.Documentation.Views {
+		if !KnownDocumentationView(view) {
+			return fmt.Errorf("unsupported documentation view %q", view)
+		}
 	}
 	allIDs := map[string]bool{}
 	enabledIDs := map[string]bool{}
@@ -347,6 +524,48 @@ func Validate(c Config) error {
 		for _, dep := range component.DependsOn {
 			if !allIDs[dep] {
 				return fmt.Errorf("component %q dependsOn unknown component %q", component.ID, dep)
+			}
+		}
+	}
+	unitIDs := map[string]bool{}
+	for _, unit := range c.DocumentationUnits {
+		if unit.ID == "" {
+			return errors.New("every documentation unit requires id")
+		}
+		if err := pathutil.ValidatePortableSegment(unit.ID); err != nil {
+			return fmt.Errorf("documentation unit id %q is not a portable path segment: %w", unit.ID, err)
+		}
+		if unitIDs[unit.ID] {
+			return fmt.Errorf("duplicate documentation unit id %q", unit.ID)
+		}
+		unitIDs[unit.ID] = true
+		if !allIDs[unit.Component] {
+			return fmt.Errorf("documentation unit %q references unknown component %q", unit.ID, unit.Component)
+		}
+		if !KnownDocumentationUnitKind(unit.Kind) {
+			return fmt.Errorf("documentation unit %q has unsupported kind %q", unit.ID, unit.Kind)
+		}
+		if unit.Output == "" {
+			return fmt.Errorf("documentation unit %q requires output", unit.ID)
+		}
+		for _, root := range unit.SourceRoots {
+			if err := validateScope(root); err != nil {
+				return fmt.Errorf("documentation unit %q source root %q: %w", unit.ID, root, err)
+			}
+		}
+		if err := validateScope(unit.Output); err != nil {
+			return fmt.Errorf("documentation unit %q output: %w", unit.ID, err)
+		}
+		for _, related := range unit.RelatedUnits {
+			if strings.TrimSpace(related) == "" {
+				return fmt.Errorf("documentation unit %q has an empty relatedUnits entry", unit.ID)
+			}
+		}
+	}
+	for _, unit := range c.DocumentationUnits {
+		for _, related := range unit.RelatedUnits {
+			if !unitIDs[related] {
+				return fmt.Errorf("documentation unit %q references unknown related unit %q", unit.ID, related)
 			}
 		}
 	}
@@ -456,4 +675,22 @@ func SupportedTypes() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func KnownDocumentationView(view string) bool {
+	switch strings.TrimSpace(strings.ToLower(view)) {
+	case "system", "domain", "component", "flow", "catalog", "platform", "engineering", "operations":
+		return true
+	default:
+		return false
+	}
+}
+
+func KnownDocumentationUnitKind(kind string) bool {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "component", "domain", "flow", "catalog", "platform", "engineering", "operations":
+		return true
+	default:
+		return false
+	}
 }

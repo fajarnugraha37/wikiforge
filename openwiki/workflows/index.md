@@ -6,5 +6,5 @@ description: "Files and subdirectories in Workflows."
 
 # Files
 
-- [WikiForge Generation Pipeline](generation-pipeline.md) - End-to-end documentation generation workflow including plan, generate, update, resume, validation, repair rounds, reporting, and knowledge-graph export
-- [WikiForge Prompt System](prompt-system.md) - Embedded prompt templates, phase contracts, specialized catalog supplements, and system-level prompt rendering
+- [WikiForge Adaptive Generation Pipeline](generation-pipeline.md) - End-to-end adaptive documentation workflow including discovery, planning, evidence indexing, page generation, validation, repair rounds, reporting, impact analysis, and knowledge-graph export
+- [WikiForge Adaptive Prompt System](prompt-system.md) - Embedded prompt templates, adaptive page contracts, profile guidance, and prompt rendering for evidence-driven documentation generation
